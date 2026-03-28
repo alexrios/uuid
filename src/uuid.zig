@@ -1,10 +1,14 @@
 const std = @import("std");
 
+/// A 128-bit universally unique identifier (RFC 9562).
+/// Stored as 16 bytes in big-endian (network) byte order. Zero heap allocations.
 pub const Uuid = struct {
     bytes: [16]u8,
 
     // -- Constants --
+    /// The nil UUID (all zeros). Represents absence of a UUID value.
     pub const nil: Uuid = .{ .bytes = .{0} ** 16 };
+    /// The max UUID (all ones). Upper bound sentinel.
     pub const max: Uuid = .{ .bytes = .{0xff} ** 16 };
 
     // -- Predefined namespace UUIDs (RFC 9562 Section 6.6) --
@@ -32,11 +36,13 @@ pub const Uuid = struct {
         reserved_future,
     };
 
+    /// Return the UUID version, or null if the version nibble is not a recognized RFC 9562 version.
     pub fn getVersion(self: Uuid) ?Version {
         const nibble: u4 = @truncate(self.bytes[6] >> 4);
         return std.meta.intToEnum(Version, nibble) catch null;
     }
 
+    /// Return the UUID variant (RFC 9562, NCS, Microsoft, or future reserved).
     pub fn getVariant(self: Uuid) Variant {
         const octet = self.bytes[8];
         if (octet & 0x80 == 0) return .reserved_ncs;
@@ -87,11 +93,18 @@ pub const Uuid = struct {
         return self.bytes[10..16].*;
     }
 
+    /// Construct a UUID from raw 16 bytes (e.g., from a database or network).
+    pub fn fromBytes(bytes: [16]u8) Uuid {
+        return .{ .bytes = bytes };
+    }
+
     // -- Comparison --
+    /// Lexicographic byte-order comparison of two UUIDs.
     pub fn order(a: Uuid, b: Uuid) std.math.Order {
         return std.mem.order(u8, &a.bytes, &b.bytes);
     }
 
+    /// Return true if two UUIDs are byte-identical.
     pub fn eql(a: Uuid, b: Uuid) bool {
         return std.mem.eql(u8, &a.bytes, &b.bytes);
     }
@@ -99,6 +112,7 @@ pub const Uuid = struct {
     // -- Formatting --
     const hex_chars = "0123456789abcdef";
 
+    /// Format as lowercase canonical string (8-4-4-4-12). Returns a stack-allocated [36]u8.
     pub fn toStr(self: Uuid) [36]u8 {
         var out: [36]u8 = undefined;
         var pos: usize = 0;
@@ -121,6 +135,7 @@ pub const Uuid = struct {
         return out;
     }
 
+    /// Write the canonical string representation to a writer. Use with `{f}` format specifier.
     pub fn format(self: Uuid, writer: anytype) !void {
         const str = self.toStr();
         try writer.writeAll(&str);
@@ -129,6 +144,8 @@ pub const Uuid = struct {
     // -- Parsing --
     pub const ParseError = error{ InvalidLength, InvalidCharacter, InvalidSeparator };
 
+    /// Parse a UUID from its canonical 8-4-4-4-12 string representation (36 chars).
+    /// Case-insensitive. Works at comptime.
     pub fn parse(buf: []const u8) ParseError!Uuid {
         if (buf.len != 36) return error.InvalidLength;
 
@@ -188,6 +205,7 @@ pub const Uuid = struct {
     }
 
     // -- v4: Random --
+    /// Generate a random (v4) UUID using the OS cryptographically secure RNG.
     pub fn v4() Uuid {
         return v4WithSource(std.crypto.random);
     }
@@ -204,6 +222,8 @@ pub const Uuid = struct {
     }
 
     // -- v3: Name-based MD5 --
+    /// Generate a name-based v3 UUID using MD5. Deterministic: same namespace + name
+    /// always produces the same UUID. Prefer v5 for new applications.
     pub fn v3(namespace: Uuid, name: []const u8) Uuid {
         var hasher = std.crypto.hash.Md5.init(.{});
         hasher.update(&namespace.bytes);
@@ -220,6 +240,8 @@ pub const Uuid = struct {
     }
 
     // -- v5: Name-based SHA-1 --
+    /// Generate a name-based v5 UUID using SHA-1. Deterministic: same namespace + name
+    /// always produces the same UUID.
     pub fn v5(namespace: Uuid, name: []const u8) Uuid {
         var hasher = std.crypto.hash.Sha1.init(.{});
         hasher.update(&namespace.bytes);
@@ -237,6 +259,8 @@ pub const Uuid = struct {
     }
 
     // -- v8: Custom --
+    /// Generate a custom (v8) UUID from caller-provided fields. Version and variant bits
+    /// are stamped automatically; the remaining 122 bits are packed from the arguments.
     pub fn v8(custom_a: u48, custom_b: u12, custom_c: u62) Uuid {
         var uuid: Uuid = undefined;
 
@@ -268,6 +292,8 @@ pub const Uuid = struct {
         initialized: bool = false,
     };
 
+    /// Per-thread state shared by v1() and v6(). Each thread has independent
+    /// clock sequence and node. Monotonicity is per-thread, not global.
     threadlocal var gregorian_state: GregorianState = .{};
 
     fn getGregorianTimestamp() u60 {
@@ -317,6 +343,9 @@ pub const Uuid = struct {
     }
 
     // -- v1: Gregorian time-based --
+    /// Generate a v1 UUID (Gregorian time-based). Pass null for node to use a random
+    /// node with the multicast bit set, or provide an explicit 6-byte node (e.g., MAC address).
+    /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
     pub fn v1(node: ?[6]u8) Uuid {
         ensureGregorianState(node);
         const ts = advanceGregorianClock();
@@ -332,11 +361,11 @@ pub const Uuid = struct {
 
         // time_low: bits 0-31 of timestamp → bytes[0..4]
         const time_low: u32 = @truncate(timestamp);
-        uuid.bytes[0..4].* = std.mem.toBytes(std.mem.nativeTo(u32, time_low, .big));
+        std.mem.writeInt(u32, uuid.bytes[0..4], time_low, .big);
 
         // time_mid: bits 32-47 of timestamp → bytes[4..6]
         const time_mid: u16 = @truncate(timestamp >> 32);
-        uuid.bytes[4..6].* = std.mem.toBytes(std.mem.nativeTo(u16, time_mid, .big));
+        std.mem.writeInt(u16, uuid.bytes[4..6], time_mid, .big);
 
         // time_hi: bits 48-59 of timestamp → lower 12 bits of bytes[6..8]
         const time_hi: u16 = @truncate(timestamp >> 48);
@@ -363,6 +392,9 @@ pub const Uuid = struct {
     }
 
     // -- v6: Reordered Gregorian time-based --
+    /// Generate a v6 UUID (reordered Gregorian time-based).
+    /// Same timestamp and node as v1, but with bits reordered for lexicographic sortability.
+    /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
     pub fn v6(node: ?[6]u8) Uuid {
         ensureGregorianState(node);
         const ts = advanceGregorianClock();
@@ -378,11 +410,11 @@ pub const Uuid = struct {
 
         // time_high: upper 32 bits of 60-bit timestamp → bytes[0..4]
         const time_high: u32 = @truncate(timestamp >> 28);
-        uuid.bytes[0..4].* = std.mem.toBytes(std.mem.nativeTo(u32, time_high, .big));
+        std.mem.writeInt(u32, uuid.bytes[0..4], time_high, .big);
 
         // time_mid: bits 16-27 of timestamp → bytes[4..6]
         const time_mid: u16 = @truncate(timestamp >> 12);
-        uuid.bytes[4..6].* = std.mem.toBytes(std.mem.nativeTo(u16, time_mid, .big));
+        std.mem.writeInt(u16, uuid.bytes[4..6], time_mid, .big);
 
         // time_low: bits 0-11 of timestamp → lower 12 bits of bytes[6..8]
         const time_low: u16 = @truncate(timestamp & 0xfff);
@@ -420,6 +452,11 @@ pub const Uuid = struct {
     /// At ~1ns per iteration, 2_000_000 iterations ≈ 2ms — well above the 1ms we need.
     const max_spin_iterations: u32 = 2_000_000;
 
+    /// Generate a v7 UUID (Unix timestamp + monotonic counter).
+    /// Thread safety: each thread maintains independent state (threadlocal).
+    /// Monotonic ordering is guaranteed only within a single thread.
+    /// Returns error.ClockStall if the system clock does not advance within ~2ms
+    /// after the 12-bit counter overflows (>4096 UUIDs in one millisecond).
     pub fn v7() error{ClockStall}!Uuid {
         // Loop replaces recursion: runs at most twice (once on counter overflow).
         for (0..2) |_| {
@@ -957,6 +994,20 @@ test "std.fmt integration" {
     var buf: [36]u8 = undefined;
     const result = std.fmt.bufPrint(&buf, "{f}", .{uuid}) catch unreachable;
     try testing.expectEqualStrings("550e8400-e29b-41d4-a716-446655440000", result);
+}
+
+// ---- fromBytes ----
+
+test "fromBytes round-trip" {
+    const original = Uuid.v4();
+    const rebuilt = Uuid.fromBytes(original.bytes);
+    try testing.expect(original.eql(rebuilt));
+}
+
+test "fromBytes with known bytes" {
+    const bytes = [16]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10 };
+    const uuid = Uuid.fromBytes(bytes);
+    try testing.expectEqualSlices(u8, &bytes, &uuid.bytes);
 }
 
 // ---- Timestamp extraction returns null for wrong version ----
