@@ -360,8 +360,10 @@ pub const Uuid = struct {
     }
 
     // -- v1: Gregorian time-based --
-    /// Generate a v1 UUID (Gregorian time-based). Pass null for node to use a random
-    /// node with the multicast bit set, or provide an explicit 6-byte node (e.g., MAC address).
+    /// Generate a v1 UUID (Gregorian time-based).
+    /// On first call, pass null to generate a random node (multicast bit set), or provide
+    /// an explicit 6-byte node (e.g., MAC address). Subsequent calls with null preserve the
+    /// previously established node. Pass a different explicit node to change it (resets clock_seq).
     /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
     pub fn v1(node: ?[6]u8) error{ClockStall}!Uuid {
         ensureGregorianState(node);
@@ -409,7 +411,8 @@ pub const Uuid = struct {
 
     // -- v6: Reordered Gregorian time-based --
     /// Generate a v6 UUID (reordered Gregorian time-based).
-    /// Same timestamp and node as v1, but with bits reordered for lexicographic sortability.
+    /// Same timestamp and node semantics as v1 (null preserves existing node after init),
+    /// but with bits reordered for lexicographic sortability.
     /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
     pub fn v6(node: ?[6]u8) error{ClockStall}!Uuid {
         ensureGregorianState(node);
@@ -484,6 +487,10 @@ pub const Uuid = struct {
                 v7_state.last_ms = now_ms;
                 v7_state.initialized = true;
             } else {
+                // Same or earlier millisecond (clock regression). Intentionally keep
+                // last_ms unchanged and increment counter — this preserves monotonicity
+                // per RFC 9562 Section 6.2: the UUID timestamp stays at the last known
+                // good value while the counter provides ordering within that timestamp.
                 if (v7_state.counter == std.math.maxInt(u12)) {
                     // Counter overflow — spin until next millisecond with bounded iterations
                     for (0..max_spin_iterations) |_| {
