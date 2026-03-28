@@ -412,7 +412,7 @@ pub const Uuid = struct {
         const time_high: u32 = @truncate(timestamp >> 28);
         std.mem.writeInt(u32, uuid.bytes[0..4], time_high, .big);
 
-        // time_mid: bits 16-27 of timestamp → bytes[4..6]
+        // time_mid: bits 12-27 of timestamp → bytes[4..6]
         const time_mid: u16 = @truncate(timestamp >> 12);
         std.mem.writeInt(u16, uuid.bytes[4..6], time_mid, .big);
 
@@ -482,7 +482,8 @@ pub const Uuid = struct {
                 v7_state.counter += 1;
             }
 
-            const ts: u48 = @truncate(@as(u64, @bitCast(v7_state.last_ms)));
+            std.debug.assert(v7_state.last_ms >= 0);
+            const ts: u48 = @truncate(@as(u64, @intCast(v7_state.last_ms)));
             var rand_b: [8]u8 = undefined;
             std.crypto.random.bytes(&rand_b);
             const uuid = v7FromFields(ts, v7_state.counter, rand_b);
