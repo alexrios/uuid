@@ -173,3 +173,63 @@ fn cmdParse(args: *std.process.ArgIterator, w: *std.Io.Writer) !void {
         try w.writeAll("Special: Max UUID\n");
     }
 }
+
+// ===================================================================
+// Tests for pure CLI functions
+// ===================================================================
+
+const testing = std.testing;
+
+test "generateUuid: all valid versions produce correct version" {
+    const cases = [_]struct { ver: []const u8, expected: Uuid.Version }{
+        .{ .ver = "v4", .expected = .random },
+        .{ .ver = "v8", .expected = .custom },
+    };
+    for (cases) |c| {
+        const uuid = try generateUuid(c.ver, null, null);
+        try testing.expectEqual(c.expected, uuid.getVersion().?);
+    }
+}
+
+test "generateUuid: v3 requires namespace and name" {
+    try testing.expectError(error.MissingNamespace, generateUuid("v3", null, "foo"));
+    try testing.expectError(error.MissingName, generateUuid("v3", Uuid.namespace_dns, null));
+}
+
+test "generateUuid: v5 requires namespace and name" {
+    try testing.expectError(error.MissingNamespace, generateUuid("v5", null, "foo"));
+    try testing.expectError(error.MissingName, generateUuid("v5", Uuid.namespace_dns, null));
+}
+
+test "generateUuid: v3 with namespace and name succeeds" {
+    const uuid = try generateUuid("v3", Uuid.namespace_dns, "example.com");
+    try testing.expectEqual(Uuid.Version.name_based_md5, uuid.getVersion().?);
+}
+
+test "generateUuid: v5 with namespace and name succeeds" {
+    const uuid = try generateUuid("v5", Uuid.namespace_dns, "example.com");
+    try testing.expectEqual(Uuid.Version.name_based_sha1, uuid.getVersion().?);
+}
+
+test "generateUuid: unknown version returns error" {
+    try testing.expectError(error.UnknownVersion, generateUuid("v9", null, null));
+    try testing.expectError(error.UnknownVersion, generateUuid("", null, null));
+    try testing.expectError(error.UnknownVersion, generateUuid("v2", null, null));
+}
+
+test "resolveNamespace: named namespaces" {
+    try testing.expect(resolveNamespace("dns").?.eql(Uuid.namespace_dns));
+    try testing.expect(resolveNamespace("url").?.eql(Uuid.namespace_url));
+    try testing.expect(resolveNamespace("oid").?.eql(Uuid.namespace_oid));
+    try testing.expect(resolveNamespace("x500").?.eql(Uuid.namespace_x500));
+}
+
+test "resolveNamespace: UUID string" {
+    const ns = resolveNamespace("6ba7b810-9dad-11d1-80b4-00c04fd430c8").?;
+    try testing.expect(ns.eql(Uuid.namespace_dns));
+}
+
+test "resolveNamespace: invalid string returns null" {
+    try testing.expectEqual(@as(?Uuid, null), resolveNamespace("garbage"));
+    try testing.expectEqual(@as(?Uuid, null), resolveNamespace(""));
+}
