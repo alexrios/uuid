@@ -97,7 +97,7 @@ fn cmdGenerate(args: *std.process.ArgIterator, w: *std.Io.Writer) !void {
 const GenerateError = error{ UnknownVersion, MissingNamespace, MissingName, ClockStall };
 
 fn generateUuid(version_str: []const u8, namespace: ?Uuid, name: ?[]const u8) GenerateError!Uuid {
-    if (std.mem.eql(u8, version_str, "v1")) return Uuid.v1(null);
+    if (std.mem.eql(u8, version_str, "v1")) return try Uuid.v1(null);
     if (std.mem.eql(u8, version_str, "v3")) {
         const ns = namespace orelse return error.MissingNamespace;
         const n = name orelse return error.MissingName;
@@ -109,7 +109,7 @@ fn generateUuid(version_str: []const u8, namespace: ?Uuid, name: ?[]const u8) Ge
         const n = name orelse return error.MissingName;
         return Uuid.v5(ns, n);
     }
-    if (std.mem.eql(u8, version_str, "v6")) return Uuid.v6(null);
+    if (std.mem.eql(u8, version_str, "v6")) return try Uuid.v6(null);
     if (std.mem.eql(u8, version_str, "v7")) return try Uuid.v7();
     if (std.mem.eql(u8, version_str, "v8")) return Uuid.v8(0, 0, 0);
     return error.UnknownVersion;

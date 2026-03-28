@@ -300,9 +300,9 @@ pub const Uuid = struct {
         const nanos: i128 = std.time.nanoTimestamp();
         const ticks: i128 = @divFloor(nanos, 100);
         const sum = ticks + @as(i128, gregorian_offset);
-        // Must be non-negative (any date after 1582-10-15) and fit in u64
-        std.debug.assert(sum >= 0);
-        const uuid_ticks: u64 = @intCast(sum);
+        // Safe in all build modes: if clock is before 1582-10-15, saturate to 0
+        // rather than invoking UB via @intCast in ReleaseFast.
+        const uuid_ticks: u64 = if (sum >= 0) @intCast(sum) else 0;
         return @truncate(uuid_ticks);
     }
 
@@ -333,10 +333,27 @@ pub const Uuid = struct {
         if (node) |n| std.debug.assert(std.mem.eql(u8, &gregorian_state.node, &n));
     }
 
-    fn advanceGregorianClock() u60 {
-        const ts = getGregorianTimestamp();
+    fn advanceGregorianClock() error{ClockStall}!u60 {
+        var ts = getGregorianTimestamp();
         if (ts <= gregorian_state.last_timestamp) {
-            gregorian_state.clock_seq +%= 1;
+            if (gregorian_state.clock_seq == std.math.maxInt(u14)) {
+                // clock_seq would wrap — stall until timestamp advances to preserve
+                // v6 lexicographic monotonicity (wrap from 0x3FFF→0x0000 causes
+                // byte[8] to decrease from 0xBF to 0x80).
+                for (0..max_spin_iterations) |_| {
+                    ts = getGregorianTimestamp();
+                    if (ts > gregorian_state.last_timestamp) break;
+                    std.atomic.spinLoopHint();
+                } else {
+                    return error.ClockStall;
+                }
+                // New timestamp: re-randomize clock_seq
+                var seq_bytes: [2]u8 = undefined;
+                std.crypto.random.bytes(&seq_bytes);
+                gregorian_state.clock_seq = @truncate(std.mem.readInt(u16, &seq_bytes, .big));
+            } else {
+                gregorian_state.clock_seq += 1;
+            }
         }
         gregorian_state.last_timestamp = ts;
         return ts;
@@ -346,11 +363,10 @@ pub const Uuid = struct {
     /// Generate a v1 UUID (Gregorian time-based). Pass null for node to use a random
     /// node with the multicast bit set, or provide an explicit 6-byte node (e.g., MAC address).
     /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
-    pub fn v1(node: ?[6]u8) Uuid {
+    pub fn v1(node: ?[6]u8) error{ClockStall}!Uuid {
         ensureGregorianState(node);
-        const ts = advanceGregorianClock();
+        const ts = try advanceGregorianClock();
         const uuid = v1FromFields(ts, gregorian_state.clock_seq, gregorian_state.node);
-        // Caller-side paired assertion: independently verify the result
         uuid.assertValid(.time_based);
         return uuid;
     }
@@ -395,11 +411,10 @@ pub const Uuid = struct {
     /// Generate a v6 UUID (reordered Gregorian time-based).
     /// Same timestamp and node as v1, but with bits reordered for lexicographic sortability.
     /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
-    pub fn v6(node: ?[6]u8) Uuid {
+    pub fn v6(node: ?[6]u8) error{ClockStall}!Uuid {
         ensureGregorianState(node);
-        const ts = advanceGregorianClock();
+        const ts = try advanceGregorianClock();
         const uuid = v6FromFields(ts, gregorian_state.clock_seq, gregorian_state.node);
-        // Caller-side paired assertion: independently verify the result
         uuid.assertValid(.time_based_reordered);
         return uuid;
     }
@@ -491,9 +506,8 @@ pub const Uuid = struct {
             uuid.assertValid(.time_based_unix);
             return uuid;
         }
-        // Unreachable: the outer loop runs at most twice and the second
-        // iteration always enters the if-branch (new millisecond).
-        unreachable;
+        // Clock regressed during spin-wait (e.g., NTP correction).
+        return error.ClockStall;
     }
 
     /// Build a v7 UUID from explicit fields (for deterministic testing).
@@ -848,26 +862,26 @@ test "v8 full round-trip: all fields" {
 // ---- v1 ----
 
 test "v1 version and variant" {
-    const uuid = Uuid.v1(null);
+    const uuid = try Uuid.v1(null);
     try testing.expectEqual(Uuid.Version.time_based, uuid.getVersion().?);
     try testing.expectEqual(Uuid.Variant.rfc9562, uuid.getVariant());
 }
 
 test "v1 with explicit node" {
     const node = [6]u8{ 0x01, 0x23, 0x45, 0x67, 0x89, 0xab };
-    const uuid = Uuid.v1(node);
+    const uuid = try Uuid.v1(node);
     try testing.expectEqualSlices(u8, &node, uuid.bytes[10..16]);
 }
 
 test "v1 random node has multicast bit set" {
     // Reset state to force new node generation
     Uuid.gregorian_state = .{};
-    const uuid = Uuid.v1(null);
+    const uuid = try Uuid.v1(null);
     try testing.expectEqual(@as(u8, 1), uuid.bytes[10] & 0x01);
 }
 
 test "v1 timestamp is extractable and reasonable" {
-    const uuid = Uuid.v1(null);
+    const uuid = try Uuid.v1(null);
     const ts = uuid.getTimestampV1().?;
     // Timestamp should be after 2020-01-01 in Gregorian ticks
     // 2020-01-01 = 438 years after 1582 ≈ 1.38e17 ticks
@@ -877,7 +891,7 @@ test "v1 timestamp is extractable and reasonable" {
 // ---- v6 ----
 
 test "v6 version and variant" {
-    const uuid = Uuid.v6(null);
+    const uuid = try Uuid.v6(null);
     try testing.expectEqual(Uuid.Version.time_based_reordered, uuid.getVersion().?);
     try testing.expectEqual(Uuid.Variant.rfc9562, uuid.getVariant());
 }
@@ -885,13 +899,13 @@ test "v6 version and variant" {
 test "v6 strict ordering" {
     // Reset state to ensure clean sequence
     Uuid.gregorian_state = .{};
-    const a = Uuid.v6(null);
-    const b = Uuid.v6(null);
+    const a = try Uuid.v6(null);
+    const b = try Uuid.v6(null);
     try testing.expect(Uuid.order(a, b) == .lt);
 }
 
 test "v6 timestamp extraction" {
-    const uuid = Uuid.v6(null);
+    const uuid = try Uuid.v6(null);
     const ts = uuid.getTimestampV6().?;
     try testing.expect(ts > 0x01d4_a2e0_0000_0000);
 }
@@ -902,8 +916,8 @@ test "v1 and v6 carry the same timestamp" {
     // which is negligible. We verify they're within 1 second of each other.
     Uuid.gregorian_state = .{};
     const node = [6]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
-    const uuid_v1 = Uuid.v1(node);
-    const uuid_v6 = Uuid.v6(node);
+    const uuid_v1 = try Uuid.v1(node);
+    const uuid_v6 = try Uuid.v6(node);
 
     const ts_v1 = uuid_v1.getTimestampV1().?;
     const ts_v6 = uuid_v6.getTimestampV6().?;
@@ -916,8 +930,8 @@ test "v1 and v6 carry the same timestamp" {
 test "v1 and v6 share the same node" {
     Uuid.gregorian_state = .{};
     const node = [6]u8{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
-    const uuid_v1 = Uuid.v1(node);
-    const uuid_v6 = Uuid.v6(node);
+    const uuid_v1 = try Uuid.v1(node);
+    const uuid_v6 = try Uuid.v6(node);
     try testing.expectEqualSlices(u8, uuid_v1.getNode().?[0..], uuid_v6.getNode().?[0..]);
 }
 
@@ -1020,12 +1034,12 @@ test "getTimestampV1 returns null for non-v1" {
 
 test "getTimestampV6 returns null for non-v6" {
     try testing.expectEqual(@as(?u60, null), Uuid.v4().getTimestampV6());
-    try testing.expectEqual(@as(?u60, null), Uuid.v1(null).getTimestampV6());
+    try testing.expectEqual(@as(?u60, null), (try Uuid.v1(null)).getTimestampV6());
 }
 
 test "getTimestampV7 returns null for non-v7" {
     try testing.expectEqual(@as(?u48, null), Uuid.v4().getTimestampV7());
-    try testing.expectEqual(@as(?u48, null), Uuid.v1(null).getTimestampV7());
+    try testing.expectEqual(@as(?u48, null), (try Uuid.v1(null)).getTimestampV7());
 }
 
 test "getClockSeq returns null for non-time-based" {
