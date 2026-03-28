@@ -1,0 +1,23 @@
+[tools]
+goreleaser = "latest"
+zig = "0.15.2"
+
+[tasks.build]
+description = "Build the library and CLI"
+run = "zig build"
+
+[tasks.test]
+description = "Run all tests"
+run = "zig build test"
+
+[tasks.fmt]
+description = "Format source files"
+run = "zig fmt src/ build.zig"
+
+[tasks.fmt-check]
+description = "Check formatting without modifying"
+run = "zig fmt --check src/ build.zig"
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "rm -rf zig-out .zig-cache"

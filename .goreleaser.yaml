@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: uuid
+
+builds:
+  - builder: zig
+    binary: uuid
+    targets:
+      - x86_64-linux
+      - aarch64-linux
+      - x86_64-macos
+      - aarch64-macos
+    flags:
+      - -Doptimize=ReleaseSafe
+
+universal_binaries:
+  - replace: true
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: []
+
+homebrew_casks:
+  - name: uuid
+    repository:
+      owner: alexrios
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/alexrios/uuid"
+    description: "RFC 9562 UUID generator and parser written in Zig"
+    license: "AGPL-3.0-or-later"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: alexrios
+    name: uuid
