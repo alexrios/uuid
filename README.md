@@ -20,6 +20,9 @@ brew install alexrios/tap/uuid
 
 ## Install (Zig package)
 
+> **Note**: Zig package fetch requires public repository access. While this repo is private,
+> use a local path dependency or `zig fetch` with authentication.
+
 Add to your `build.zig.zon` dependencies:
 
 ```zig

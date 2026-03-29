@@ -18,4 +18,6 @@ jobs:
 
       - run: zig build test
 
+      - run: zig build -Doptimize=ReleaseSafe
+
       - run: zig fmt --check src/ build.zig

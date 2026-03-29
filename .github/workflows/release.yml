@@ -21,7 +21,6 @@ jobs:
           version: 0.15.2
 
       - name: Run GoReleaser
-        id: goreleaser
         uses: goreleaser/goreleaser-action@v6
         # continue-on-error: Homebrew tap push may fail (e.g., expired token)
         # but the GitHub release with binaries should still be published.
@@ -33,11 +32,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
-      - name: Check release artifacts exist
+      - name: Verify release assets were uploaded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ ! -d dist ] || [ -z "$(ls dist/*.tar.gz 2>/dev/null)" ]; then
-            echo "::error::Release artifacts not found — build failed"
+          TAG="${GITHUB_REF_NAME}"
+          ASSET_COUNT=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          if [ "$ASSET_COUNT" -lt 1 ]; then
+            echo "::error::GitHub release $TAG has no uploaded assets"
             exit 1
           fi
-          echo "Release artifacts created successfully"
-          ls -la dist/*.tar.gz dist/checksums.txt
+          echo "Release $TAG has $ASSET_COUNT assets uploaded"
+          gh release view "$TAG" --json assets --jq '.assets[].name'

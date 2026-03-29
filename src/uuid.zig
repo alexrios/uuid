@@ -14,9 +14,13 @@ pub fn UuidImpl(
     // Note: these @compileError checks cannot be exercised by zig test (no compile_fail support).
     // Verified by inspection: checks cover return type and parameter count.
     comptime {
+        if (@typeInfo(@TypeOf(nanoTimestampFn)) != .@"fn")
+            @compileError("nanoTimestampFn must be a function, got " ++ @typeName(@TypeOf(nanoTimestampFn)));
         const nano_info = @typeInfo(@TypeOf(nanoTimestampFn)).@"fn";
         if (nano_info.params.len != 0) @compileError("nanoTimestampFn must take no parameters");
         if (nano_info.return_type.? != i128) @compileError("nanoTimestampFn must return i128");
+        if (@typeInfo(@TypeOf(milliTimestampFn)) != .@"fn")
+            @compileError("milliTimestampFn must be a function, got " ++ @typeName(@TypeOf(milliTimestampFn)));
         const milli_info = @typeInfo(@TypeOf(milliTimestampFn)).@"fn";
         if (milli_info.params.len != 0) @compileError("milliTimestampFn must take no parameters");
         if (milli_info.return_type.? != i64) @compileError("milliTimestampFn must return i64");
