@@ -32,7 +32,7 @@ zig fetch --save git+https://github.com/alexrios/uuid
 Or pinned to a specific release:
 
 ```sh
-zig fetch --save https://github.com/alexrios/uuid/archive/refs/tags/v0.2.0.tar.gz
+zig fetch --save https://github.com/alexrios/uuid/archive/refs/tags/v1.0.0.tar.gz
 ```
 
 Then in your `build.zig`:
