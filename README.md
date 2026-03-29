@@ -4,35 +4,16 @@ RFC 9562 UUIDs in Zig. Library and CLI.
 
 I wanted a UUID implementation that doesn't allocate, doesn't panic on clock weirdness, and follows the actual spec instead of whatever half-baked subset most libraries ship. So I wrote one.
 
-
-## what's in the box
-
-- All UUID versions from RFC 9562: v1, v3, v4, v5, v6, v7, v8
-- Nil and max UUIDs
-- Namespace constants (DNS, URL, OID, X.500)
-- Parse (case-insensitive) and format (canonical 8-4-4-4-12)
-- Lexicographic byte-order comparison
-- Zero heap allocations
-- Single Zig file
-
 ## install
-
-Homebrew:
 
 ```sh
 brew install alexrios/tap/uuid
 ```
 
-As a Zig package:
+Or as a Zig dependency:
 
 ```sh
 zig fetch --save git+https://github.com/alexrios/uuid
-```
-
-Or pinned to a specific release:
-
-```sh
-zig fetch --save https://github.com/alexrios/uuid/archive/refs/tags/v1.0.0.tar.gz
 ```
 
 Then in your `build.zig`:
@@ -42,43 +23,43 @@ const uuid_dep = b.dependency("uuid", .{ .target = target, .optimize = optimize 
 exe.root_module.addImport("uuid", uuid_dep.module("uuid"));
 ```
 
-## CLI
+## quick start
+
+```zig
+const Uuid = @import("uuid").Uuid;
+
+const id = Uuid.v4();                                       // random
+const id7 = try Uuid.v7();                                  // time-sorted
+const id5 = Uuid.v5(Uuid.namespace_dns, "example.com");     // deterministic
+
+const parsed = try Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
+const str = parsed.toStr();   // "550e8400-e29b-41d4-a716-446655440000"
+```
+
+There's also a CLI:
 
 ```sh
 uuid generate v4
 uuid generate v7
 uuid generate v5 --namespace dns --name "example.com"
-
 uuid parse "2ed6657d-e927-568b-95e1-2665a8aea6a2"
-# UUID:    2ed6657d-e927-568b-95e1-2665a8aea6a2
-# Version: 5 (Name-based SHA-1)
-# Variant: RFC 9562
 ```
 
-## library
+## what's in the box
 
-```zig
-const Uuid = @import("uuid").Uuid;
-
-const id = Uuid.v4();
-const id7 = try Uuid.v7();
-const id5 = Uuid.v5(Uuid.namespace_dns, "example.com");
-
-const parsed = try Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
-const str = parsed.toStr(); // [36]u8
-
-const ord = Uuid.order(a, b); // std.math.Order
-```
+- All UUID versions from RFC 9562: v1, v3, v4, v5, v6, v7, v8
+- Nil and max UUIDs, namespace constants (DNS, URL, OID, X.500)
+- Parse (case-insensitive) and format (canonical 8-4-4-4-12)
+- Lexicographic byte-order comparison
+- Zero heap allocations, single Zig file
 
 ## things you should know
 
-v1, v6, and v7 can return `error.ClockStall`. This happens when the internal counter overflows and the system clock doesn't advance in time. In practice: more than 4096 v7 UUIDs in a single millisecond, or more than 16384 v1/v6 UUIDs in a single 100ns tick. Also happens if your clock is having a bad day (VM live migration, aggressive NTP step, CPU throttling).
+**ClockStall.** v1, v6, and v7 can return `error.ClockStall`. This fires when you generate too many UUIDs too fast (>4096/ms for v7, >16384 per 100ns tick for v1/v6) or when the system clock misbehaves (VM migration, NTP step, CPU throttling). Don't `catch unreachable` it.
 
-Don't write `catch unreachable`. Handle the error.
+**Per-thread monotonicity.** Each thread has its own counter. UUIDs from different threads don't sort relative to each other.
 
-Monotonicity is per-thread. Each OS thread has its own counter and timestamp state. UUIDs from different threads are not ordered relative to each other. If you need global ordering across threads, that's your problem to solve (and it's a hard one).
-
-If you're using v7 across multiple machines and expecting sort order to mean something, your clocks need to agree. Clock skew between machines means the UUIDs will sort wrong during the skew window. NTP is your friend here.
+**Distributed clocks.** v7 sort order depends on clock sync. If your machines disagree on the time, the UUIDs will sort wrong during the skew window.
 
 ## development
 
