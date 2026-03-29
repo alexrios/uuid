@@ -1282,6 +1282,17 @@ test "v7 deterministic: timestamp ordering" {
     try testing.expect(Uuid.order(uuid_early, uuid_late) == .lt);
 }
 
+// -- RFC 9562 Appendix A test vectors --
+test "v7 RFC 9562 Appendix A.6 test vector" {
+    // unix_ts_ms = 0x017F22E279B0, rand_a = 0xCC3, rand_b = 0x18C4DC0C0C07398F
+    const uuid = Uuid.v7FromFields(
+        0x017F22E279B0,
+        0xCC3,
+        .{ 0x18, 0xC4, 0xDC, 0x0C, 0x0C, 0x07, 0x39, 0x8F },
+    );
+    try testing.expectEqualStrings("017f22e2-79b0-7cc3-98c4-dc0c0c07398f", &uuid.toStr());
+}
+
 // -- v1 deterministic: timestamp=0 (Gregorian epoch exactly) --
 test "v1 deterministic: timestamp zero" {
     const uuid = Uuid.v1FromFields(0, 0, .{ 0, 0, 0, 0, 0, 0 });
