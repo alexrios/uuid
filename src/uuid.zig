@@ -11,6 +11,12 @@ pub fn UuidImpl(
     comptime nanoTimestampFn: anytype,
     comptime milliTimestampFn: anytype,
 ) type {
+    comptime {
+        const NanoReturn = @typeInfo(@TypeOf(nanoTimestampFn)).@"fn".return_type.?;
+        if (NanoReturn != i128) @compileError("nanoTimestampFn must return i128");
+        const MilliReturn = @typeInfo(@TypeOf(milliTimestampFn)).@"fn".return_type.?;
+        if (MilliReturn != i64) @compileError("milliTimestampFn must return i64");
+    }
     return struct {
         const Self = @This();
 
@@ -1444,7 +1450,7 @@ test "v7 counter overflow resolves when clock advances" {
     }.clock);
     AdvancingUuid.v7_state = .{ .initialized = true, .last_ms = 1000, .counter = std.math.maxInt(u12) };
     const uuid = try AdvancingUuid.v7();
-    try testing.expectEqual(Uuid.Version.time_based_unix, uuid.getVersion().?);
+    try testing.expectEqual(AdvancingUuid.Version.time_based_unix, uuid.getVersion().?);
     try testing.expectEqual(@as(u48, 1001), uuid.getTimestampV7().?);
 }
 
@@ -1454,7 +1460,7 @@ test "v1 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
             return 0;
         }
     }.clock, std.time.milliTimestamp);
-    const expected_ts: u60 = @truncate(Uuid.gregorian_offset);
+    const expected_ts: u60 = @truncate(FrozenUuid.gregorian_offset);
     FrozenUuid.gregorian_state = .{
         .initialized = true,
         .last_timestamp = expected_ts,
@@ -1470,7 +1476,7 @@ test "v6 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
             return 0;
         }
     }.clock, std.time.milliTimestamp);
-    const expected_ts: u60 = @truncate(Uuid.gregorian_offset);
+    const expected_ts: u60 = @truncate(FrozenUuid.gregorian_offset);
     FrozenUuid.gregorian_state = .{
         .initialized = true,
         .last_timestamp = expected_ts,
@@ -1488,7 +1494,7 @@ test "v1 clock_seq overflow resolves when Gregorian clock advances" {
             return if (@This().calls <= 1) 0 else 100;
         }
     }.clock, std.time.milliTimestamp);
-    const expected_ts: u60 = @truncate(Uuid.gregorian_offset);
+    const expected_ts: u60 = @truncate(AdvancingUuid.gregorian_offset);
     AdvancingUuid.gregorian_state = .{
         .initialized = true,
         .last_timestamp = expected_ts,
@@ -1496,7 +1502,7 @@ test "v1 clock_seq overflow resolves when Gregorian clock advances" {
         .node = .{ 0x01, 0, 0, 0, 0, 0 },
     };
     const uuid = try AdvancingUuid.v1(null);
-    try testing.expectEqual(Uuid.Version.time_based, uuid.getVersion().?);
+    try testing.expectEqual(AdvancingUuid.Version.time_based, uuid.getVersion().?);
     // clock_seq was re-randomized (no longer maxInt with overwhelming probability)
     try testing.expect(AdvancingUuid.gregorian_state.clock_seq != std.math.maxInt(u14));
 }
