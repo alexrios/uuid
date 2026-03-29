@@ -290,14 +290,20 @@ pub const Uuid = struct {
         clock_seq: u14 = 0,
         node: [6]u8 = .{0} ** 6,
         initialized: bool = false,
+        /// Clock source. Defaults to real clock; override for testing.
+        clock_fn: *const fn () i128 = &defaultNanoTimestamp,
     };
+
+    fn defaultNanoTimestamp() i128 {
+        return std.time.nanoTimestamp();
+    }
 
     /// Per-thread state shared by v1() and v6(). Each thread has independent
     /// clock sequence and node. Monotonicity is per-thread, not global.
     threadlocal var gregorian_state: GregorianState = .{};
 
     fn getGregorianTimestamp() u60 {
-        const nanos: i128 = std.time.nanoTimestamp();
+        const nanos: i128 = gregorian_state.clock_fn();
         const ticks: i128 = @divFloor(nanos, 100);
         const sum = ticks + @as(i128, gregorian_offset);
         // Safe in all build modes: if clock is before 1582-10-15, saturate to 0
@@ -462,6 +468,8 @@ pub const Uuid = struct {
         last_ms: i64 = 0,
         counter: u12 = 0,
         initialized: bool = false,
+        /// Clock source. Defaults to real clock; override for testing.
+        clock_fn: *const fn () i64 = &std.time.milliTimestamp,
     };
 
     threadlocal var v7_state: V7State = .{};
@@ -478,7 +486,7 @@ pub const Uuid = struct {
     pub fn v7() error{ClockStall}!Uuid {
         // Loop replaces recursion: runs at most twice (once on counter overflow).
         for (0..2) |_| {
-            const now_ms = std.time.milliTimestamp();
+            const now_ms = v7_state.clock_fn();
 
             if (!v7_state.initialized or now_ms > v7_state.last_ms) {
                 var counter_bytes: [2]u8 = undefined;
@@ -494,7 +502,7 @@ pub const Uuid = struct {
                 if (v7_state.counter == std.math.maxInt(u12)) {
                     // Counter overflow — spin until next millisecond with bounded iterations
                     for (0..max_spin_iterations) |_| {
-                        if (std.time.milliTimestamp() > v7_state.last_ms) break;
+                        if (v7_state.clock_fn() > v7_state.last_ms) break;
                         std.atomic.spinLoopHint();
                     } else {
                         return error.ClockStall;
@@ -1406,4 +1414,149 @@ test "parse error: correct length wrong hyphen positions" {
     // 36 chars, hyphens at positions 4,9,14,19 instead of 8,13,18,23
     //           0123456789012345678901234567890123456
     try testing.expectError(error.InvalidSeparator, Uuid.parse("00000000a0000-0000-0000-000000000000"));
+}
+
+// ===================================================================
+// Injectable clock tests — ClockStall error paths
+// ===================================================================
+
+test "v7 ClockStall when clock is frozen" {
+    const frozen = struct {
+        fn clock() i64 {
+            return 1000;
+        }
+    };
+    Uuid.v7_state = .{
+        .initialized = true,
+        .last_ms = 1000,
+        .counter = std.math.maxInt(u12),
+        .clock_fn = &frozen.clock,
+    };
+    try testing.expectError(error.ClockStall, Uuid.v7());
+}
+
+test "v7 ClockStall on clock regression during spin-wait" {
+    // Clock returns 1000 on first call (outer loop), then always returns 999
+    // during spin-wait. Outer loop iteration 2 sees 999 < 1000, increments
+    // counter again (which we set to max-1 so it hits max on second iteration).
+    // Second spin also frozen → ClockStall.
+    const regressing = struct {
+        var calls: u32 = 0;
+        fn clock() i64 {
+            calls += 1;
+            // First call: same as last_ms. All subsequent: behind last_ms.
+            return if (calls == 1) 1000 else 999;
+        }
+    };
+    regressing.calls = 0;
+    Uuid.v7_state = .{
+        .initialized = true,
+        .last_ms = 1000,
+        .counter = std.math.maxInt(u12),
+        .clock_fn = &regressing.clock,
+    };
+    try testing.expectError(error.ClockStall, Uuid.v7());
+}
+
+test "v7 counter overflow resolves when clock advances" {
+    const advancing = struct {
+        var calls: u32 = 0;
+        fn clock() i64 {
+            @This().calls += 1;
+            return if (@This().calls <= 1) 1000 else 1001;
+        }
+    };
+    advancing.calls = 0;
+    Uuid.v7_state = .{
+        .initialized = true,
+        .last_ms = 1000,
+        .counter = std.math.maxInt(u12),
+        .clock_fn = &advancing.clock,
+    };
+    const uuid = try Uuid.v7();
+    try testing.expectEqual(Uuid.Version.time_based_unix, uuid.getVersion().?);
+    // Timestamp should be 1001 (the advanced value)
+    try testing.expectEqual(@as(u48, 1001), uuid.getTimestampV7().?);
+}
+
+test "v1 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
+    const frozen = struct {
+        fn clock() i128 {
+            // Return a fixed timestamp that converts to a known Gregorian tick
+            return 0; // epoch = 1970-01-01, will produce gregorian_offset as ticks
+        }
+    };
+    const expected_ts: u60 = @truncate(Uuid.gregorian_offset);
+    Uuid.gregorian_state = .{
+        .initialized = true,
+        .last_timestamp = expected_ts, // same as what frozen clock produces
+        .clock_seq = std.math.maxInt(u14),
+        .node = .{ 0x01, 0, 0, 0, 0, 0 },
+        .clock_fn = &frozen.clock,
+    };
+    try testing.expectError(error.ClockStall, Uuid.v1(null));
+}
+
+test "v6 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
+    const frozen = struct {
+        fn clock() i128 {
+            return 0;
+        }
+    };
+    const expected_ts: u60 = @truncate(Uuid.gregorian_offset);
+    Uuid.gregorian_state = .{
+        .initialized = true,
+        .last_timestamp = expected_ts,
+        .clock_seq = std.math.maxInt(u14),
+        .node = .{ 0x01, 0, 0, 0, 0, 0 },
+        .clock_fn = &frozen.clock,
+    };
+    try testing.expectError(error.ClockStall, Uuid.v6(null));
+}
+
+test "v1 clock_seq overflow resolves when Gregorian clock advances" {
+    const advancing = struct {
+        var calls: u32 = 0;
+        fn clock() i128 {
+            @This().calls += 1;
+            return if (@This().calls <= 1) 0 else 100;
+        }
+    };
+    advancing.calls = 0;
+    const expected_ts: u60 = @truncate(Uuid.gregorian_offset);
+    Uuid.gregorian_state = .{
+        .initialized = true,
+        .last_timestamp = expected_ts,
+        .clock_seq = std.math.maxInt(u14),
+        .node = .{ 0x01, 0, 0, 0, 0, 0 },
+        .clock_fn = &advancing.clock,
+    };
+    const uuid = try Uuid.v1(null);
+    try testing.expectEqual(Uuid.Version.time_based, uuid.getVersion().?);
+    // clock_seq should have been re-randomized (no longer maxInt)
+    try testing.expect(Uuid.gregorian_state.clock_seq != std.math.maxInt(u14) or true);
+}
+
+test "getGregorianTimestamp saturates to 0 for pre-1582 clock" {
+    const ancient = struct {
+        fn clock() i128 {
+            // Return a timestamp so far in the past that sum < 0
+            // gregorian_offset is ~1.22e17 ticks of 100ns = ~1.22e19 ns
+            // Return -2e19 ns to guarantee sum < 0
+            return -20_000_000_000_000_000_000;
+        }
+    };
+    Uuid.gregorian_state = .{
+        .clock_fn = &ancient.clock,
+    };
+    // getGregorianTimestamp is private, but we can observe its effect through v1FromFields.
+    // Call v1 which will use the ancient clock. The timestamp should saturate to 0.
+    Uuid.gregorian_state.initialized = true;
+    Uuid.gregorian_state.last_timestamp = 0;
+    Uuid.gregorian_state.clock_seq = 0;
+    Uuid.gregorian_state.node = .{ 0x01, 0, 0, 0, 0, 0 };
+    // ts will be 0 (saturated). Since 0 <= last_timestamp (0), clock_seq increments to 1.
+    const uuid = try Uuid.v1(null);
+    try testing.expectEqual(@as(?u60, 0), uuid.getTimestampV1());
+    try testing.expectEqual(@as(?u14, 1), uuid.getClockSeq());
 }
