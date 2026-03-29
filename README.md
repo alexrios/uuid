@@ -25,16 +25,13 @@ brew install alexrios/tap/uuid
 
 As a Zig package:
 
-```zig
-// build.zig.zon
-.uuid = .{
-    .url = "https://github.com/alexrios/uuid/archive/refs/tags/v0.2.0.tar.gz",
-    .hash = "...",
-},
+```sh
+zig fetch --save https://github.com/alexrios/uuid/archive/refs/tags/v0.2.0.tar.gz
 ```
 
+Then in your `build.zig`:
+
 ```zig
-// build.zig
 const uuid_dep = b.dependency("uuid", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("uuid", uuid_dep.module("uuid"));
 ```
