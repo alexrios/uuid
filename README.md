@@ -26,6 +26,12 @@ brew install alexrios/tap/uuid
 As a Zig package:
 
 ```sh
+zig fetch --save git+https://github.com/alexrios/uuid
+```
+
+Or pinned to a specific release:
+
+```sh
 zig fetch --save https://github.com/alexrios/uuid/archive/refs/tags/v0.2.0.tar.gz
 ```
 
