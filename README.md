@@ -23,7 +23,7 @@ Homebrew:
 brew install alexrios/tap/uuid
 ```
 
-As a Zig package (requires public repo access, or use a local path dep):
+As a Zig package:
 
 ```zig
 // build.zig.zon
