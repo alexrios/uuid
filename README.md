@@ -4,11 +4,16 @@ RFC 9562 UUIDs in Zig. Library and CLI.
 
 I wanted a UUID implementation that doesn't allocate, doesn't panic on clock weirdness, and follows the actual spec instead of whatever half-baked subset most libraries ship. So I wrote one.
 
-The whole thing follows [NASA/JPL's Power of 10](https://en.wikipedia.org/wiki/The_Power_of_10:_Rules_for_Developing_Safety-Critical_Code) rules and [TigerBeetle's paired assertion pattern](https://tigerbeetle.com/blog/2023-12-27-it-takes-two-to-contract/). No recursion, all loops bounded, every generator asserts its own output through an independent code path. 109 tests.
 
 ## what's in the box
 
-All UUID versions from RFC 9562 (v1, v3, v4, v5, v6, v7, v8), plus nil/max, namespace constants (DNS, URL, OID, X.500), parsing, formatting, and comparison. Zero heap allocations. The whole thing is a single Zig file.
+- All UUID versions from RFC 9562: v1, v3, v4, v5, v6, v7, v8
+- Nil and max UUIDs
+- Namespace constants (DNS, URL, OID, X.500)
+- Parse (case-insensitive) and format (canonical 8-4-4-4-12)
+- Lexicographic byte-order comparison
+- Zero heap allocations
+- Single Zig file, 109 tests
 
 ## install
 
