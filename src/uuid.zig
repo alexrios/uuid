@@ -11,11 +11,15 @@ pub fn UuidImpl(
     comptime nanoTimestampFn: anytype,
     comptime milliTimestampFn: anytype,
 ) type {
+    // Note: these @compileError checks cannot be exercised by zig test (no compile_fail support).
+    // Verified by inspection: checks cover return type and parameter count.
     comptime {
-        const NanoReturn = @typeInfo(@TypeOf(nanoTimestampFn)).@"fn".return_type.?;
-        if (NanoReturn != i128) @compileError("nanoTimestampFn must return i128");
-        const MilliReturn = @typeInfo(@TypeOf(milliTimestampFn)).@"fn".return_type.?;
-        if (MilliReturn != i64) @compileError("milliTimestampFn must return i64");
+        const nano_info = @typeInfo(@TypeOf(nanoTimestampFn)).@"fn";
+        if (nano_info.params.len != 0) @compileError("nanoTimestampFn must take no parameters");
+        if (nano_info.return_type.? != i128) @compileError("nanoTimestampFn must return i128");
+        const milli_info = @typeInfo(@TypeOf(milliTimestampFn)).@"fn";
+        if (milli_info.params.len != 0) @compileError("milliTimestampFn must take no parameters");
+        if (milli_info.return_type.? != i64) @compileError("milliTimestampFn must return i64");
     }
     return struct {
         const Self = @This();

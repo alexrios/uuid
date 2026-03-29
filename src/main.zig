@@ -14,7 +14,16 @@ const usage =
     \\
 ;
 
-pub fn main() !void {
+pub fn main() void {
+    run() catch |err| {
+        // BrokenPipe is expected when piped to head/grep/etc. Exit silently.
+        if (err == error.BrokenPipe) return;
+        // All other errors: exit with non-zero status.
+        std.process.exit(1);
+    };
+}
+
+fn run() !void {
     var buf: [4096]u8 = undefined;
     var stdout = std.fs.File.stdout().writerStreaming(&buf);
     const w = &stdout.interface;
