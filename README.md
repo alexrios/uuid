@@ -13,7 +13,7 @@ I wanted a UUID implementation that doesn't allocate, doesn't panic on clock wei
 - Parse (case-insensitive) and format (canonical 8-4-4-4-12)
 - Lexicographic byte-order comparison
 - Zero heap allocations
-- Single Zig file, 109 tests
+- Single Zig file
 
 ## install
 
@@ -86,7 +86,7 @@ Requires [mise](https://mise.jdx.dev/).
 
 ```sh
 mise install        # zig 0.15.2 + goreleaser
-mise run test       # 109 tests
+mise run test       # run tests
 mise run build      # build
 mise run fmt        # format
 ```
