@@ -1,97 +1,84 @@
 # uuid
 
-RFC 9562 UUID library and CLI for Zig 0.15.2.
+RFC 9562 UUIDs in Zig. Library and CLI.
 
-## Features
+I wanted a UUID implementation that doesn't allocate, doesn't panic on clock weirdness, and follows the actual spec instead of whatever half-baked subset most libraries ship. So I wrote one.
 
-- All UUID versions: v1, v3, v4, v5, v6, v7, v8
-- Nil and Max UUIDs
-- Predefined namespace UUIDs (DNS, URL, OID, X.500)
-- Parse (case-insensitive) and format (canonical lowercase 8-4-4-4-12)
-- Lexicographic byte-order comparison
-- Zero heap allocations
-- Safety-critical: follows NASA/JPL Power of 10 rules with paired assertions
+The whole thing follows [NASA/JPL's Power of 10](https://en.wikipedia.org/wiki/The_Power_of_10:_Rules_for_Developing_Safety-Critical_Code) rules and [TigerBeetle's paired assertion pattern](https://tigerbeetle.com/blog/2023-12-27-it-takes-two-to-contract/). No recursion, all loops bounded, every generator asserts its own output through an independent code path. 109 tests.
 
-## Install (Homebrew)
+## what's in the box
+
+All UUID versions from RFC 9562 (v1, v3, v4, v5, v6, v7, v8), plus nil/max, namespace constants (DNS, URL, OID, X.500), parsing, formatting, and comparison. Zero heap allocations. The whole thing is a single Zig file.
+
+## install
+
+Homebrew:
 
 ```sh
 brew install alexrios/tap/uuid
 ```
 
-## Install (Zig package)
-
-> **Note**: Zig package fetch requires public repository access. While this repo is private,
-> use a local path dependency or `zig fetch` with authentication.
-
-Add to your `build.zig.zon` dependencies:
+As a Zig package (requires public repo access, or use a local path dep):
 
 ```zig
+// build.zig.zon
 .uuid = .{
-    .url = "https://github.com/alexrios/uuid/archive/refs/tags/v0.1.0.tar.gz",
+    .url = "https://github.com/alexrios/uuid/archive/refs/tags/v0.2.0.tar.gz",
     .hash = "...",
 },
 ```
 
-Then in `build.zig`:
-
 ```zig
+// build.zig
 const uuid_dep = b.dependency("uuid", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("uuid", uuid_dep.module("uuid"));
 ```
 
-## CLI Usage
+## CLI
 
 ```sh
-# Generate UUIDs
 uuid generate v4
 uuid generate v7
 uuid generate v5 --namespace dns --name "example.com"
 
-# Parse and inspect
 uuid parse "2ed6657d-e927-568b-95e1-2665a8aea6a2"
 # UUID:    2ed6657d-e927-568b-95e1-2665a8aea6a2
 # Version: 5 (Name-based SHA-1)
 # Variant: RFC 9562
 ```
 
-## Library Usage
+## library
 
 ```zig
 const Uuid = @import("uuid").Uuid;
 
-// Generate
 const id = Uuid.v4();
-const id1 = try Uuid.v1(null);  // v1, v6, v7 return error{ClockStall}!Uuid
 const id7 = try Uuid.v7();
-
-// Name-based (deterministic)
 const id5 = Uuid.v5(Uuid.namespace_dns, "example.com");
 
-// Parse and format
 const parsed = try Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
 const str = parsed.toStr(); // [36]u8
 
-// Compare
 const ord = Uuid.order(a, b); // std.math.Order
-const eq = a.eql(b);
 ```
 
-## Notes
+## things you should know
 
-**error.ClockStall**: v1, v6, and v7 return `error{ClockStall}` when the internal counter overflows and the system clock does not advance in time. This can happen under high throughput (>4096 v7 UUIDs/ms, >16384 v1/v6 UUIDs per 100ns tick) or on systems with clock issues (VM live migration, NTP step, heavy CPU throttling). Do not use `catch unreachable` — handle the error or use `catch` with a retry/fallback.
+v1, v6, and v7 can return `error.ClockStall`. This happens when the internal counter overflows and the system clock doesn't advance in time. In practice: more than 4096 v7 UUIDs in a single millisecond, or more than 16384 v1/v6 UUIDs in a single 100ns tick. Also happens if your clock is having a bad day (VM live migration, aggressive NTP step, CPU throttling).
 
-**Monotonicity is per-thread, not global.** Each OS thread maintains independent state for v1/v6/v7. UUIDs from different threads are not guaranteed to be ordered relative to each other.
+Don't write `catch unreachable`. Handle the error.
 
-**Distributed clock skew**: v7 sortability depends on synchronized clocks across machines. If Machine A's clock is ahead of Machine B's, B's UUIDs will sort before A's during the skew window. Use NTP/PTP to minimize clock drift in distributed deployments.
+Monotonicity is per-thread. Each OS thread has its own counter and timestamp state. UUIDs from different threads are not ordered relative to each other. If you need global ordering across threads, that's your problem to solve (and it's a hard one).
 
-## Development
+If you're using v7 across multiple machines and expecting sort order to mean something, your clocks need to agree. Clock skew between machines means the UUIDs will sort wrong during the skew window. NTP is your friend here.
 
-Requires [mise](https://mise.jdx.dev/) for tool management.
+## development
+
+Requires [mise](https://mise.jdx.dev/).
 
 ```sh
-mise install        # Install zig 0.15.2 + goreleaser
-mise run test       # Run tests
-mise run build      # Build
-mise run fmt        # Format
-mise run fmt-check  # Check formatting
+mise install        # zig 0.15.2 + goreleaser
+mise run test       # 109 tests
+mise run build      # build
+mise run fmt        # format
 ```
