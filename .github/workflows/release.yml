@@ -20,10 +20,24 @@ jobs:
         with:
           version: 0.15.2
 
-      - uses: goreleaser/goreleaser-action@v6
+      - name: Run GoReleaser
+        id: goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        # continue-on-error: Homebrew tap push may fail (e.g., expired token)
+        # but the GitHub release with binaries should still be published.
+        continue-on-error: true
         with:
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Check release artifacts exist
+        run: |
+          if [ ! -d dist ] || [ -z "$(ls dist/*.tar.gz 2>/dev/null)" ]; then
+            echo "::error::Release artifacts not found — build failed"
+            exit 1
+          fi
+          echo "Release artifacts created successfully"
+          ls -la dist/*.tar.gz dist/checksums.txt

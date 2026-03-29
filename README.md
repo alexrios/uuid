@@ -58,6 +58,7 @@ const Uuid = @import("uuid").Uuid;
 
 // Generate
 const id = Uuid.v4();
+const id1 = try Uuid.v1(null);  // v1, v6, v7 return error{ClockStall}!Uuid
 const id7 = try Uuid.v7();
 
 // Name-based (deterministic)
@@ -71,6 +72,14 @@ const str = parsed.toStr(); // [36]u8
 const ord = Uuid.order(a, b); // std.math.Order
 const eq = a.eql(b);
 ```
+
+## Notes
+
+**error.ClockStall**: v1, v6, and v7 return `error{ClockStall}` when the internal counter overflows and the system clock does not advance in time. This can happen under high throughput (>4096 v7 UUIDs/ms, >16384 v1/v6 UUIDs per 100ns tick) or on systems with clock issues (VM live migration, NTP step, heavy CPU throttling). Do not use `catch unreachable` — handle the error or use `catch` with a retry/fallback.
+
+**Monotonicity is per-thread, not global.** Each OS thread maintains independent state for v1/v6/v7. UUIDs from different threads are not guaranteed to be ordered relative to each other.
+
+**Distributed clock skew**: v7 sortability depends on synchronized clocks across machines. If Machine A's clock is ahead of Machine B's, B's UUIDs will sort before A's during the skew window. Use NTP/PTP to minimize clock drift in distributed deployments.
 
 ## Development
 

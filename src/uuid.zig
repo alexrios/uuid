@@ -386,6 +386,8 @@ pub fn UuidImpl(
         /// an explicit 6-byte node (e.g., MAC address). Subsequent calls with null preserve the
         /// previously established node. Pass a different explicit node to change it (resets clock_seq).
         /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
+        /// Returns error.ClockStall if the 14-bit clock sequence overflows (>16384 UUIDs
+        /// within one 100ns tick) and the system clock does not advance in time.
         pub fn v1(node: ?[6]u8) error{ClockStall}!Self {
             ensureGregorianState(node);
             const ts = try advanceGregorianClock();
@@ -435,6 +437,8 @@ pub fn UuidImpl(
         /// Same timestamp and node semantics as v1 (null preserves existing node after init),
         /// but with bits reordered for lexicographic sortability.
         /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
+        /// Returns error.ClockStall if the 14-bit clock sequence overflows (>16384 UUIDs
+        /// within one 100ns tick) and the system clock does not advance in time.
         pub fn v6(node: ?[6]u8) error{ClockStall}!Self {
             ensureGregorianState(node);
             const ts = try advanceGregorianClock();
@@ -487,8 +491,9 @@ pub fn UuidImpl(
 
         threadlocal var v7_state: V7State = .{};
 
-        /// Maximum number of spin iterations waiting for the next millisecond.
-        /// At ~1ns per iteration, 2_000_000 iterations ≈ 2ms — well above the 1ms we need.
+        /// Maximum spin iterations waiting for the clock to advance.
+        /// spinLoopHint() cost varies by platform (~10-30 cycles on x86, more on VMs).
+        /// At ~10ns per iteration, 2M iterations ≈ 20ms — well above the 1ms minimum.
         const max_spin_iterations: u32 = 2_000_000;
 
         /// Generate a v7 UUID (Unix timestamp + monotonic counter).
