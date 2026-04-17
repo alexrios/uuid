@@ -1,8 +1,17 @@
 const std = @import("std");
+const Io = std.Io;
 
 /// A 128-bit universally unique identifier (RFC 9562).
 /// Stored as 16 bytes in big-endian (network) byte order. Zero heap allocations.
-pub const Uuid = UuidImpl(std.time.nanoTimestamp, std.time.milliTimestamp);
+pub const Uuid = UuidImpl(defaultNanoTimestamp, defaultMilliTimestamp);
+
+fn defaultNanoTimestamp(io: Io) i96 {
+    return Io.Timestamp.now(io, .real).toNanoseconds();
+}
+
+fn defaultMilliTimestamp(io: Io) i64 {
+    return Io.Timestamp.now(io, .real).toMilliseconds();
+}
 
 /// Generic UUID implementation parameterized by clock sources.
 /// Production code uses `Uuid` (which binds real clocks). Tests can instantiate
@@ -17,12 +26,14 @@ pub fn UuidImpl(
         if (@typeInfo(@TypeOf(nanoTimestampFn)) != .@"fn")
             @compileError("nanoTimestampFn must be a function, got " ++ @typeName(@TypeOf(nanoTimestampFn)));
         const nano_info = @typeInfo(@TypeOf(nanoTimestampFn)).@"fn";
-        if (nano_info.params.len != 0) @compileError("nanoTimestampFn must take no parameters");
-        if (nano_info.return_type.? != i128) @compileError("nanoTimestampFn must return i128");
+        if (nano_info.params.len != 1) @compileError("nanoTimestampFn must take one parameter (Io)");
+        if (nano_info.params[0].type.? != Io) @compileError("nanoTimestampFn parameter must be Io");
+        if (nano_info.return_type.? != i96) @compileError("nanoTimestampFn must return i96");
         if (@typeInfo(@TypeOf(milliTimestampFn)) != .@"fn")
             @compileError("milliTimestampFn must be a function, got " ++ @typeName(@TypeOf(milliTimestampFn)));
         const milli_info = @typeInfo(@TypeOf(milliTimestampFn)).@"fn";
-        if (milli_info.params.len != 0) @compileError("milliTimestampFn must take no parameters");
+        if (milli_info.params.len != 1) @compileError("milliTimestampFn must take one parameter (Io)");
+        if (milli_info.params[0].type.? != Io) @compileError("milliTimestampFn parameter must be Io");
         if (milli_info.return_type.? != i64) @compileError("milliTimestampFn must return i64");
     }
     return struct {
@@ -64,7 +75,16 @@ pub fn UuidImpl(
         /// Return the UUID version, or null if the version nibble is not a recognized RFC 9562 version.
         pub fn getVersion(self: Self) ?Version {
             const nibble: u4 = @truncate(self.bytes[6] >> 4);
-            return std.meta.intToEnum(Version, nibble) catch null;
+            return switch (nibble) {
+                1 => .time_based,
+                3 => .name_based_md5,
+                4 => .random,
+                5 => .name_based_sha1,
+                6 => .time_based_reordered,
+                7 => .time_based_unix,
+                8 => .custom,
+                else => null,
+            };
         }
 
         /// Return the UUID variant (RFC 9562, NCS, Microsoft, or future reserved).
@@ -161,7 +181,7 @@ pub fn UuidImpl(
         }
 
         /// Write the canonical string representation to a writer. Use with `{f}` format specifier.
-        pub fn format(self: Self, writer: anytype) !void {
+        pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
             const str = self.toStr();
             try writer.writeAll(&str);
         }
@@ -231,8 +251,17 @@ pub fn UuidImpl(
 
         // -- v4: Random --
         /// Generate a random (v4) UUID using the OS cryptographically secure RNG.
-        pub fn v4() Self {
-            return v4WithSource(std.crypto.random);
+        /// Uses io.random (ChaCha20 CSPRNG seeded from OS entropy) rather than
+        /// io.randomSecure (direct syscall per call). Both are cryptographically
+        /// appropriate for RFC 9562; the CSPRNG avoids a syscall per UUID.
+        pub fn v4(io: Io) Self {
+            var uuid: Self = undefined;
+            io.random(&uuid.bytes);
+            setVersion(&uuid.bytes, @intFromEnum(Version.random));
+            setVariant(&uuid.bytes);
+            std.debug.assert(uuid.getVersion() == .random);
+            std.debug.assert(uuid.getVariant() == .rfc9562);
+            return uuid;
         }
 
         /// Build a v4 UUID from an explicit random source (for deterministic testing).
@@ -321,25 +350,25 @@ pub fn UuidImpl(
         /// clock sequence and node. Monotonicity is per-thread, not global.
         threadlocal var gregorian_state: GregorianState = .{};
 
-        fn getGregorianTimestamp() u60 {
-            const nanos: i128 = nanoTimestampFn();
-            const ticks: i128 = @divFloor(nanos, 100);
-            const sum = ticks + @as(i128, gregorian_offset);
+        fn getGregorianTimestamp(io: Io) u60 {
+            const nanos: i96 = nanoTimestampFn(io);
+            const ticks: i96 = @divFloor(nanos, 100);
+            const sum = ticks + @as(i96, gregorian_offset);
             // Safe in all build modes: if clock is before 1582-10-15, saturate to 0
             // rather than invoking UB via @intCast in ReleaseFast.
             const uuid_ticks: u64 = if (sum >= 0) @intCast(sum) else 0;
             return @truncate(uuid_ticks);
         }
 
-        fn ensureGregorianState(node: ?[6]u8) void {
+        fn ensureGregorianState(io: Io, node: ?[6]u8) void {
             if (!gregorian_state.initialized) {
                 var seq_bytes: [2]u8 = undefined;
-                std.crypto.random.bytes(&seq_bytes);
+                io.random(&seq_bytes);
                 gregorian_state.clock_seq = @truncate(std.mem.readInt(u16, &seq_bytes, .big));
                 if (node) |n| {
                     gregorian_state.node = n;
                 } else {
-                    std.crypto.random.bytes(&gregorian_state.node);
+                    io.random(&gregorian_state.node);
                     gregorian_state.node[0] |= 0x01; // multicast bit
                 }
                 gregorian_state.initialized = true;
@@ -348,7 +377,7 @@ pub fn UuidImpl(
                     gregorian_state.node = n;
                     // RFC 9562 Section 4.5: reset clock_seq when node changes
                     var seq_bytes: [2]u8 = undefined;
-                    std.crypto.random.bytes(&seq_bytes);
+                    io.random(&seq_bytes);
                     gregorian_state.clock_seq = @truncate(std.mem.readInt(u16, &seq_bytes, .big));
                 }
             }
@@ -358,15 +387,15 @@ pub fn UuidImpl(
             if (node) |n| std.debug.assert(std.mem.eql(u8, &gregorian_state.node, &n));
         }
 
-        fn advanceGregorianClock() error{ClockStall}!u60 {
-            var ts = getGregorianTimestamp();
+        fn advanceGregorianClock(io: Io) error{ClockStall}!u60 {
+            var ts = getGregorianTimestamp(io);
             if (ts <= gregorian_state.last_timestamp) {
                 if (gregorian_state.clock_seq == std.math.maxInt(u14)) {
                     // clock_seq would wrap — stall until timestamp advances to preserve
                     // v6 lexicographic monotonicity (wrap from 0x3FFF→0x0000 causes
                     // byte[8] to decrease from 0xBF to 0x80).
                     for (0..max_spin_iterations) |_| {
-                        ts = getGregorianTimestamp();
+                        ts = getGregorianTimestamp(io);
                         if (ts > gregorian_state.last_timestamp) break;
                         std.atomic.spinLoopHint();
                     } else {
@@ -374,7 +403,7 @@ pub fn UuidImpl(
                     }
                     // New timestamp: re-randomize clock_seq
                     var seq_bytes: [2]u8 = undefined;
-                    std.crypto.random.bytes(&seq_bytes);
+                    io.random(&seq_bytes);
                     gregorian_state.clock_seq = @truncate(std.mem.readInt(u16, &seq_bytes, .big));
                 } else {
                     gregorian_state.clock_seq += 1;
@@ -392,9 +421,9 @@ pub fn UuidImpl(
         /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
         /// Returns error.ClockStall if the 14-bit clock sequence overflows (>16384 UUIDs
         /// within one 100ns tick) and the system clock does not advance in time.
-        pub fn v1(node: ?[6]u8) error{ClockStall}!Self {
-            ensureGregorianState(node);
-            const ts = try advanceGregorianClock();
+        pub fn v1(io: Io, node: ?[6]u8) error{ClockStall}!Self {
+            ensureGregorianState(io, node);
+            const ts = try advanceGregorianClock(io);
             const uuid = v1FromFields(ts, gregorian_state.clock_seq, gregorian_state.node);
             uuid.assertValid(.time_based);
             return uuid;
@@ -443,9 +472,9 @@ pub fn UuidImpl(
         /// Thread safety: uses per-thread state. Monotonicity is per-thread, not global.
         /// Returns error.ClockStall if the 14-bit clock sequence overflows (>16384 UUIDs
         /// within one 100ns tick) and the system clock does not advance in time.
-        pub fn v6(node: ?[6]u8) error{ClockStall}!Self {
-            ensureGregorianState(node);
-            const ts = try advanceGregorianClock();
+        pub fn v6(io: Io, node: ?[6]u8) error{ClockStall}!Self {
+            ensureGregorianState(io, node);
+            const ts = try advanceGregorianClock(io);
             const uuid = v6FromFields(ts, gregorian_state.clock_seq, gregorian_state.node);
             uuid.assertValid(.time_based_reordered);
             return uuid;
@@ -503,16 +532,16 @@ pub fn UuidImpl(
         /// Generate a v7 UUID (Unix timestamp + monotonic counter).
         /// Thread safety: each thread maintains independent state (threadlocal).
         /// Monotonic ordering is guaranteed only within a single thread.
-        /// Returns error.ClockStall if the system clock does not advance within ~2ms
+        /// Returns error.ClockStall if the system clock does not advance within ~20ms
         /// after the 12-bit counter overflows (>4096 UUIDs in one millisecond).
-        pub fn v7() error{ClockStall}!Self {
+        pub fn v7(io: Io) error{ClockStall}!Self {
             // Loop replaces recursion: runs at most twice (once on counter overflow).
             for (0..2) |_| {
-                const now_ms = milliTimestampFn();
+                const now_ms = milliTimestampFn(io);
 
                 if (!v7_state.initialized or now_ms > v7_state.last_ms) {
                     var counter_bytes: [2]u8 = undefined;
-                    std.crypto.random.bytes(&counter_bytes);
+                    io.random(&counter_bytes);
                     v7_state.counter = @truncate(std.mem.readInt(u16, &counter_bytes, .big));
                     v7_state.last_ms = now_ms;
                     v7_state.initialized = true;
@@ -524,7 +553,7 @@ pub fn UuidImpl(
                     if (v7_state.counter == std.math.maxInt(u12)) {
                         // Counter overflow — spin until next millisecond with bounded iterations
                         for (0..max_spin_iterations) |_| {
-                            if (milliTimestampFn() > v7_state.last_ms) break;
+                            if (milliTimestampFn(io) > v7_state.last_ms) break;
                             std.atomic.spinLoopHint();
                         } else {
                             return error.ClockStall;
@@ -537,7 +566,7 @@ pub fn UuidImpl(
                 std.debug.assert(v7_state.last_ms >= 0);
                 const ts: u48 = @truncate(@as(u64, @intCast(v7_state.last_ms)));
                 var rand_b: [8]u8 = undefined;
-                std.crypto.random.bytes(&rand_b);
+                io.random(&rand_b);
                 const uuid = v7FromFields(ts, v7_state.counter, rand_b);
                 // Caller-side paired assertion: independently verify the result
                 uuid.assertValid(.time_based_unix);
@@ -759,20 +788,20 @@ test "version detection returns null for unknown versions" {
 // ---- v4 ----
 
 test "v4 version and variant" {
-    const uuid = Uuid.v4();
+    const uuid = Uuid.v4(testing.io);
     try testing.expectEqual(Uuid.Version.random, uuid.getVersion().?);
     try testing.expectEqual(Uuid.Variant.rfc9562, uuid.getVariant());
 }
 
 test "v4 uniqueness" {
-    const a = Uuid.v4();
-    const b = Uuid.v4();
+    const a = Uuid.v4(testing.io);
+    const b = Uuid.v4(testing.io);
     try testing.expect(!a.eql(b));
 }
 
 test "v4 version and variant bits are correct across many UUIDs" {
     for (0..100) |_| {
-        const uuid = Uuid.v4();
+        const uuid = Uuid.v4(testing.io);
         // Version nibble must be 0x4
         try testing.expectEqual(@as(u8, 0x40), uuid.bytes[6] & 0xf0);
         // Variant must be 0b10
@@ -900,26 +929,26 @@ test "v8 full round-trip: all fields" {
 // ---- v1 ----
 
 test "v1 version and variant" {
-    const uuid = try Uuid.v1(null);
+    const uuid = try Uuid.v1(testing.io, null);
     try testing.expectEqual(Uuid.Version.time_based, uuid.getVersion().?);
     try testing.expectEqual(Uuid.Variant.rfc9562, uuid.getVariant());
 }
 
 test "v1 with explicit node" {
     const node = [6]u8{ 0x01, 0x23, 0x45, 0x67, 0x89, 0xab };
-    const uuid = try Uuid.v1(node);
+    const uuid = try Uuid.v1(testing.io, node);
     try testing.expectEqualSlices(u8, &node, uuid.bytes[10..16]);
 }
 
 test "v1 random node has multicast bit set" {
     // Reset state to force new node generation
     Uuid.gregorian_state = .{};
-    const uuid = try Uuid.v1(null);
+    const uuid = try Uuid.v1(testing.io, null);
     try testing.expectEqual(@as(u8, 1), uuid.bytes[10] & 0x01);
 }
 
 test "v1 timestamp is extractable and reasonable" {
-    const uuid = try Uuid.v1(null);
+    const uuid = try Uuid.v1(testing.io, null);
     const ts = uuid.getTimestampV1().?;
     // Timestamp should be after 2020-01-01 in Gregorian ticks
     // 2020-01-01 = 438 years after 1582 ≈ 1.38e17 ticks
@@ -929,7 +958,7 @@ test "v1 timestamp is extractable and reasonable" {
 // ---- v6 ----
 
 test "v6 version and variant" {
-    const uuid = try Uuid.v6(null);
+    const uuid = try Uuid.v6(testing.io, null);
     try testing.expectEqual(Uuid.Version.time_based_reordered, uuid.getVersion().?);
     try testing.expectEqual(Uuid.Variant.rfc9562, uuid.getVariant());
 }
@@ -937,13 +966,13 @@ test "v6 version and variant" {
 test "v6 strict ordering" {
     // Reset state to ensure clean sequence
     Uuid.gregorian_state = .{};
-    const a = try Uuid.v6(null);
-    const b = try Uuid.v6(null);
+    const a = try Uuid.v6(testing.io, null);
+    const b = try Uuid.v6(testing.io, null);
     try testing.expect(Uuid.order(a, b) == .lt);
 }
 
 test "v6 timestamp extraction" {
-    const uuid = try Uuid.v6(null);
+    const uuid = try Uuid.v6(testing.io, null);
     const ts = uuid.getTimestampV6().?;
     try testing.expect(ts > 0x01d4_a2e0_0000_0000);
 }
@@ -954,8 +983,8 @@ test "v1 and v6 carry the same timestamp" {
     // which is negligible. We verify they're within 1 second of each other.
     Uuid.gregorian_state = .{};
     const node = [6]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
-    const uuid_v1 = try Uuid.v1(node);
-    const uuid_v6 = try Uuid.v6(node);
+    const uuid_v1 = try Uuid.v1(testing.io, node);
+    const uuid_v6 = try Uuid.v6(testing.io, node);
 
     const ts_v1 = uuid_v1.getTimestampV1().?;
     const ts_v6 = uuid_v6.getTimestampV6().?;
@@ -968,21 +997,21 @@ test "v1 and v6 carry the same timestamp" {
 test "v1 and v6 share the same node" {
     Uuid.gregorian_state = .{};
     const node = [6]u8{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
-    const uuid_v1 = try Uuid.v1(node);
-    const uuid_v6 = try Uuid.v6(node);
+    const uuid_v1 = try Uuid.v1(testing.io, node);
+    const uuid_v6 = try Uuid.v6(testing.io, node);
     try testing.expectEqualSlices(u8, uuid_v1.getNode().?[0..], uuid_v6.getNode().?[0..]);
 }
 
 // ---- v7 ----
 
 test "v7 version and variant" {
-    const uuid = try Uuid.v7();
+    const uuid = try Uuid.v7(testing.io);
     try testing.expectEqual(Uuid.Version.time_based_unix, uuid.getVersion().?);
     try testing.expectEqual(Uuid.Variant.rfc9562, uuid.getVariant());
 }
 
 test "v7 timestamp is extractable and reasonable" {
-    const uuid = try Uuid.v7();
+    const uuid = try Uuid.v7(testing.io);
     const ts_ms = uuid.getTimestampV7().?;
     // Should be after 2020-01-01 00:00:00 UTC = 1577836800000 ms
     try testing.expect(ts_ms > 1_577_836_800_000);
@@ -990,9 +1019,9 @@ test "v7 timestamp is extractable and reasonable" {
 
 test "v7 monotonic ordering: 5000 iterations" {
     Uuid.v7_state = .{};
-    var prev = try Uuid.v7();
+    var prev = try Uuid.v7(testing.io);
     for (0..5000) |_| {
-        const next = try Uuid.v7();
+        const next = try Uuid.v7(testing.io);
         try testing.expect(Uuid.order(prev, next) == .lt);
         prev = next;
     }
@@ -1000,7 +1029,7 @@ test "v7 monotonic ordering: 5000 iterations" {
 
 test "v7 version and variant bits across many UUIDs" {
     for (0..200) |_| {
-        const uuid = try Uuid.v7();
+        const uuid = try Uuid.v7(testing.io);
         try testing.expectEqual(@as(u8, 0x70), uuid.bytes[6] & 0xf0);
         try testing.expectEqual(@as(u8, 0x80), uuid.bytes[8] & 0xc0);
     }
@@ -1052,7 +1081,7 @@ test "std.fmt integration" {
 // ---- fromBytes ----
 
 test "fromBytes round-trip" {
-    const original = Uuid.v4();
+    const original = Uuid.v4(testing.io);
     const rebuilt = Uuid.fromBytes(original.bytes);
     try testing.expect(original.eql(rebuilt));
 }
@@ -1066,28 +1095,28 @@ test "fromBytes with known bytes" {
 // ---- Timestamp extraction returns null for wrong version ----
 
 test "getTimestampV1 returns null for non-v1" {
-    try testing.expectEqual(@as(?u60, null), Uuid.v4().getTimestampV1());
-    try testing.expectEqual(@as(?u60, null), (try Uuid.v7()).getTimestampV1());
+    try testing.expectEqual(@as(?u60, null), Uuid.v4(testing.io).getTimestampV1());
+    try testing.expectEqual(@as(?u60, null), (try Uuid.v7(testing.io)).getTimestampV1());
 }
 
 test "getTimestampV6 returns null for non-v6" {
-    try testing.expectEqual(@as(?u60, null), Uuid.v4().getTimestampV6());
-    try testing.expectEqual(@as(?u60, null), (try Uuid.v1(null)).getTimestampV6());
+    try testing.expectEqual(@as(?u60, null), Uuid.v4(testing.io).getTimestampV6());
+    try testing.expectEqual(@as(?u60, null), (try Uuid.v1(testing.io, null)).getTimestampV6());
 }
 
 test "getTimestampV7 returns null for non-v7" {
-    try testing.expectEqual(@as(?u48, null), Uuid.v4().getTimestampV7());
-    try testing.expectEqual(@as(?u48, null), (try Uuid.v1(null)).getTimestampV7());
+    try testing.expectEqual(@as(?u48, null), Uuid.v4(testing.io).getTimestampV7());
+    try testing.expectEqual(@as(?u48, null), (try Uuid.v1(testing.io, null)).getTimestampV7());
 }
 
 test "getClockSeq returns null for non-time-based" {
-    try testing.expectEqual(@as(?u14, null), Uuid.v4().getClockSeq());
-    try testing.expectEqual(@as(?u14, null), (try Uuid.v7()).getClockSeq());
+    try testing.expectEqual(@as(?u14, null), Uuid.v4(testing.io).getClockSeq());
+    try testing.expectEqual(@as(?u14, null), (try Uuid.v7(testing.io)).getClockSeq());
 }
 
 test "getNode returns null for non-time-based" {
-    try testing.expectEqual(@as(?[6]u8, null), Uuid.v4().getNode());
-    try testing.expectEqual(@as(?[6]u8, null), (try Uuid.v7()).getNode());
+    try testing.expectEqual(@as(?[6]u8, null), Uuid.v4(testing.io).getNode());
+    try testing.expectEqual(@as(?[6]u8, null), (try Uuid.v7(testing.io)).getNode());
 }
 
 // ===================================================================
@@ -1112,20 +1141,7 @@ test "v4 deterministic: seeded random produces expected UUID" {
 
 // -- v1 deterministic: known timestamp, clock_seq, node --
 test "v1 deterministic: known fields produce exact bytes" {
-    // Timestamp: 0x1E4_ABCD_1234_5678 (a 60-bit value)
-    // = 0x1E4ABCD12345678
-    //   time_low  (bits 0-31)  = 0x12345678
-    //   time_mid  (bits 32-47) = 0xBCD1      (wait — let me compute properly)
-    //
-    // timestamp = 0x1E4_ABCD_1234_5678
-    //   bits [0:31]  = 0x12345678 → time_low
-    //   bits [32:47] = 0xABCD     → wait, let me recompute
-    //
-    // 0x1E4ABCD12345678 in binary:
-    //   0001 1110 0100 1010 1011 1100 1101 0001 0010 0011 0100 0101 0110 0111 1000
-    //   That's 61 bits — too big for u60. Let me use a valid 60-bit value.
-    //
-    // Use timestamp = 0x1D8_ABCD_EF01_2345 (fits in 60 bits)
+    // Timestamp: 0x1D8_ABCD_EF01_2345 (fits in 60 bits)
     //   time_low  = bits[0:31]  = 0xEF012345
     //   time_mid  = bits[32:47] = 0xABCD
     //   time_hi   = bits[48:59] = 0x1D8
@@ -1344,9 +1360,9 @@ test "v1 node change resets clock_seq" {
     Uuid.gregorian_state = .{};
     const node_a = [6]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
     const node_b = [6]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
-    _ = try Uuid.v1(node_a);
+    _ = try Uuid.v1(testing.io, node_a);
     const seq_after_a = Uuid.gregorian_state.clock_seq;
-    _ = try Uuid.v1(node_b);
+    _ = try Uuid.v1(testing.io, node_b);
     // Node must have changed
     try testing.expectEqualSlices(u8, &node_b, &Uuid.gregorian_state.node);
     // clock_seq was re-randomized — with overwhelming probability it differs
@@ -1359,9 +1375,9 @@ test "v1 node change resets clock_seq" {
 test "v1 null node preserves existing node after init" {
     Uuid.gregorian_state = .{};
     const explicit_node = [6]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
-    _ = try Uuid.v1(explicit_node);
+    _ = try Uuid.v1(testing.io, explicit_node);
     // Second call with null should keep the explicit node
-    _ = try Uuid.v1(null);
+    _ = try Uuid.v1(testing.io, null);
     try testing.expectEqualSlices(u8, &explicit_node, &Uuid.gregorian_state.node);
 }
 
@@ -1373,7 +1389,7 @@ test "v1 clock_seq overflow does not stall when timestamp advances" {
         .node = .{ 0x01, 0, 0, 0, 0, 0 },
     };
     // Real clock > 0, so the spin in advanceGregorianClock should break immediately
-    const uuid = try Uuid.v1(null);
+    const uuid = try Uuid.v1(testing.io, null);
     try testing.expectEqual(Uuid.Version.time_based, uuid.getVersion().?);
     try testing.expectEqual(Uuid.Variant.rfc9562, uuid.getVariant());
     // Real clock always advances past 0, so last_timestamp must have changed
@@ -1386,7 +1402,7 @@ test "v7 clock regression increments counter" {
         .last_ms = std.math.maxInt(i64) >> 1, // far future — real clock will be behind
         .counter = 100,
     };
-    const uuid = try Uuid.v7();
+    const uuid = try Uuid.v7(testing.io);
     // Counter should have incremented (clock regression enters else branch)
     try testing.expectEqual(@as(u12, 101), Uuid.v7_state.counter);
     // Timestamp in UUID should be the old last_ms, not the current time
@@ -1399,8 +1415,8 @@ test "v7 clock regression preserves monotonicity" {
         .last_ms = std.math.maxInt(i64) >> 1,
         .counter = 0,
     };
-    const a = try Uuid.v7();
-    const b = try Uuid.v7();
+    const a = try Uuid.v7(testing.io);
+    const b = try Uuid.v7(testing.io);
     try testing.expect(Uuid.order(a, b) == .lt);
 }
 
@@ -1455,35 +1471,35 @@ test "parse error: correct length wrong hyphen positions" {
 // ===================================================================
 
 test "v7 ClockStall when clock is frozen" {
-    const FrozenUuid = UuidImpl(std.time.nanoTimestamp, struct {
-        fn clock() i64 {
+    const FrozenUuid = UuidImpl(defaultNanoTimestamp, struct {
+        fn clock(_: Io) i64 {
             return 1000;
         }
     }.clock);
     FrozenUuid.v7_state = .{ .initialized = true, .last_ms = 1000, .counter = std.math.maxInt(u12) };
-    try testing.expectError(error.ClockStall, FrozenUuid.v7());
+    try testing.expectError(error.ClockStall, FrozenUuid.v7(testing.io));
 }
 
 test "v7 counter overflow resolves when clock advances" {
-    const AdvancingUuid = UuidImpl(std.time.nanoTimestamp, struct {
+    const AdvancingUuid = UuidImpl(defaultNanoTimestamp, struct {
         var calls: u32 = 0;
-        fn clock() i64 {
+        fn clock(_: Io) i64 {
             @This().calls += 1;
             return if (@This().calls <= 1) 1000 else 1001;
         }
     }.clock);
     AdvancingUuid.v7_state = .{ .initialized = true, .last_ms = 1000, .counter = std.math.maxInt(u12) };
-    const uuid = try AdvancingUuid.v7();
+    const uuid = try AdvancingUuid.v7(testing.io);
     try testing.expectEqual(AdvancingUuid.Version.time_based_unix, uuid.getVersion().?);
     try testing.expectEqual(@as(u48, 1001), uuid.getTimestampV7().?);
 }
 
 test "v1 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
     const FrozenUuid = UuidImpl(struct {
-        fn clock() i128 {
+        fn clock(_: Io) i96 {
             return 0;
         }
-    }.clock, std.time.milliTimestamp);
+    }.clock, defaultMilliTimestamp);
     const expected_ts: u60 = @truncate(FrozenUuid.gregorian_offset);
     FrozenUuid.gregorian_state = .{
         .initialized = true,
@@ -1491,15 +1507,15 @@ test "v1 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
         .clock_seq = std.math.maxInt(u14),
         .node = .{ 0x01, 0, 0, 0, 0, 0 },
     };
-    try testing.expectError(error.ClockStall, FrozenUuid.v1(null));
+    try testing.expectError(error.ClockStall, FrozenUuid.v1(testing.io, null));
 }
 
 test "v6 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
     const FrozenUuid = UuidImpl(struct {
-        fn clock() i128 {
+        fn clock(_: Io) i96 {
             return 0;
         }
-    }.clock, std.time.milliTimestamp);
+    }.clock, defaultMilliTimestamp);
     const expected_ts: u60 = @truncate(FrozenUuid.gregorian_offset);
     FrozenUuid.gregorian_state = .{
         .initialized = true,
@@ -1507,17 +1523,17 @@ test "v6 ClockStall when Gregorian clock is frozen and clock_seq exhausted" {
         .clock_seq = std.math.maxInt(u14),
         .node = .{ 0x01, 0, 0, 0, 0, 0 },
     };
-    try testing.expectError(error.ClockStall, FrozenUuid.v6(null));
+    try testing.expectError(error.ClockStall, FrozenUuid.v6(testing.io, null));
 }
 
 test "v1 clock_seq overflow resolves when Gregorian clock advances" {
     const AdvancingUuid = UuidImpl(struct {
         var calls: u32 = 0;
-        fn clock() i128 {
+        fn clock(_: Io) i96 {
             @This().calls += 1;
             return if (@This().calls <= 1) 0 else 100;
         }
-    }.clock, std.time.milliTimestamp);
+    }.clock, defaultMilliTimestamp);
     const expected_ts: u60 = @truncate(AdvancingUuid.gregorian_offset);
     AdvancingUuid.gregorian_state = .{
         .initialized = true,
@@ -1525,7 +1541,7 @@ test "v1 clock_seq overflow resolves when Gregorian clock advances" {
         .clock_seq = std.math.maxInt(u14),
         .node = .{ 0x01, 0, 0, 0, 0, 0 },
     };
-    const uuid = try AdvancingUuid.v1(null);
+    const uuid = try AdvancingUuid.v1(testing.io, null);
     try testing.expectEqual(AdvancingUuid.Version.time_based, uuid.getVersion().?);
     // clock_seq was re-randomized (no longer maxInt with overwhelming probability)
     try testing.expect(AdvancingUuid.gregorian_state.clock_seq != std.math.maxInt(u14));
@@ -1533,10 +1549,10 @@ test "v1 clock_seq overflow resolves when Gregorian clock advances" {
 
 test "getGregorianTimestamp saturates to 0 for pre-1582 clock" {
     const AncientUuid = UuidImpl(struct {
-        fn clock() i128 {
+        fn clock(_: Io) i96 {
             return -20_000_000_000_000_000_000;
         }
-    }.clock, std.time.milliTimestamp);
+    }.clock, defaultMilliTimestamp);
     AncientUuid.gregorian_state = .{
         .initialized = true,
         .last_timestamp = 0,
@@ -1544,7 +1560,7 @@ test "getGregorianTimestamp saturates to 0 for pre-1582 clock" {
         .node = .{ 0x01, 0, 0, 0, 0, 0 },
     };
     // ts saturates to 0. Since 0 <= last_timestamp (0), clock_seq increments to 1.
-    const uuid = try AncientUuid.v1(null);
+    const uuid = try AncientUuid.v1(testing.io, null);
     try testing.expectEqual(@as(?u60, 0), uuid.getTimestampV1());
     try testing.expectEqual(@as(?u14, 1), uuid.getClockSeq());
 }

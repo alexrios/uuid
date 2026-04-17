@@ -26,14 +26,26 @@ exe.root_module.addImport("uuid", uuid_dep.module("uuid"));
 ## quick start
 
 ```zig
+const std = @import("std");
 const Uuid = @import("uuid").Uuid;
 
-const id = Uuid.v4();                                       // random
-const id7 = try Uuid.v7();                                  // time-sorted
-const id5 = Uuid.v5(Uuid.namespace_dns, "example.com");     // deterministic
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    var buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &buf);
+    const w = &stdout.interface;
 
-const parsed = try Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
-const str = parsed.toStr();   // "550e8400-e29b-41d4-a716-446655440000"
+    const id = Uuid.v4(io);                                      // random
+    const id7 = try Uuid.v7(io);                                 // time-sorted
+    const id5 = Uuid.v5(Uuid.namespace_dns, "example.com");      // deterministic
+    const parsed = try Uuid.parse("550e8400-e29b-41d4-a716-446655440000");
+
+    for ([_][36]u8{ id.toStr(), id7.toStr(), id5.toStr(), parsed.toStr() }) |s| {
+        try w.writeAll(&s);
+        try w.writeAll("\n");
+    }
+    try w.flush();
+}
 ```
 
 There's also a CLI:
@@ -66,7 +78,7 @@ uuid parse "2ed6657d-e927-568b-95e1-2665a8aea6a2"
 Requires [mise](https://mise.jdx.dev/).
 
 ```sh
-mise install        # zig 0.15.2 + goreleaser
+mise install        # zig 0.16.0 + goreleaser
 mise run test       # run tests
 mise run build      # build
 mise run fmt        # format
