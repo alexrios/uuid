@@ -563,8 +563,9 @@ pub fn UuidImpl(
                     v7_state.counter += 1;
                 }
 
-                std.debug.assert(v7_state.last_ms >= 0);
-                const ts: u48 = @truncate(@as(u64, @intCast(v7_state.last_ms)));
+                // Safe in all build modes: if clock is before Unix epoch, saturate to 0
+                // rather than invoking UB via @intCast in ReleaseFast.
+                const ts: u48 = if (v7_state.last_ms >= 0) @truncate(@as(u64, @intCast(v7_state.last_ms))) else 0;
                 var rand_b: [8]u8 = undefined;
                 io.random(&rand_b);
                 const uuid = v7FromFields(ts, v7_state.counter, rand_b);
@@ -1563,4 +1564,16 @@ test "getGregorianTimestamp saturates to 0 for pre-1582 clock" {
     const uuid = try AncientUuid.v1(testing.io, null);
     try testing.expectEqual(@as(?u60, 0), uuid.getTimestampV1());
     try testing.expectEqual(@as(?u14, 1), uuid.getClockSeq());
+}
+
+test "v7 saturates timestamp to 0 for pre-epoch clock" {
+    const AncientUuid = UuidImpl(defaultNanoTimestamp, struct {
+        fn clock(_: Io) i64 {
+            return -1_000_000;
+        }
+    }.clock);
+    AncientUuid.v7_state = .{};
+    const uuid = try AncientUuid.v7(testing.io);
+    try testing.expectEqual(Uuid.Version.time_based_unix, uuid.getVersion().?);
+    try testing.expectEqual(@as(u48, 0), uuid.getTimestampV7().?);
 }
