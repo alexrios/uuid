@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const Uuid = @import("uuid").Uuid;
 
 const usage =
@@ -14,21 +15,22 @@ const usage =
     \\
 ;
 
-pub fn main() void {
-    run() catch |err| {
-        // BrokenPipe is expected when piped to head/grep/etc. Exit silently.
-        if (err == error.BrokenPipe) return;
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| {
+        // WriteFailed covers broken pipes (expected when piped to head/grep/etc).
+        if (err == error.WriteFailed) return;
         // All other errors: exit with non-zero status.
         std.process.exit(1);
     };
 }
 
-fn run() !void {
+fn run(init: std.process.Init) !void {
+    const io = init.io;
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&buf);
+    var stdout = Io.File.stdout().writerStreaming(io, &buf);
     const w = &stdout.interface;
 
-    var args = std.process.args();
+    var args = init.minimal.args.iterate();
     const has_prog_name = args.skip();
     std.debug.assert(has_prog_name); // argv[0] must always exist
 
@@ -39,7 +41,7 @@ fn run() !void {
     };
 
     if (std.mem.eql(u8, command, "generate")) {
-        try cmdGenerate(&args, w);
+        try cmdGenerate(&args, w, io);
     } else if (std.mem.eql(u8, command, "parse")) {
         try cmdParse(&args, w);
     } else {
@@ -51,7 +53,7 @@ fn run() !void {
     try w.flush();
 }
 
-fn cmdGenerate(args: *std.process.ArgIterator, w: *std.Io.Writer) !void {
+fn cmdGenerate(args: *std.process.Args.Iterator, w: *Io.Writer, io: Io) !void {
     const version_str = args.next() orelse {
         try w.writeAll("Error: missing version argument\n");
         return;
@@ -84,7 +86,7 @@ fn cmdGenerate(args: *std.process.ArgIterator, w: *std.Io.Writer) !void {
         }
     }
 
-    const uuid = generateUuid(version_str, namespace, name) catch |err| {
+    const uuid = generateUuid(io, version_str, namespace, name) catch |err| {
         switch (err) {
             error.UnknownVersion => {
                 try w.writeAll("Error: unknown version '");
@@ -93,7 +95,7 @@ fn cmdGenerate(args: *std.process.ArgIterator, w: *std.Io.Writer) !void {
             },
             error.MissingNamespace => try w.writeAll("Error: v3/v5 require --namespace\n"),
             error.MissingName => try w.writeAll("Error: v3/v5 require --name\n"),
-            error.ClockStall => try w.writeAll("Error: system clock stalled, could not generate v7 UUID\n"),
+            error.ClockStall => try w.writeAll("Error: system clock stalled, could not generate UUID\n"),
         }
         return;
     };
@@ -105,21 +107,21 @@ fn cmdGenerate(args: *std.process.ArgIterator, w: *std.Io.Writer) !void {
 
 const GenerateError = error{ UnknownVersion, MissingNamespace, MissingName, ClockStall };
 
-fn generateUuid(version_str: []const u8, namespace: ?Uuid, name: ?[]const u8) GenerateError!Uuid {
-    if (std.mem.eql(u8, version_str, "v1")) return try Uuid.v1(null);
+fn generateUuid(io: Io, version_str: []const u8, namespace: ?Uuid, name: ?[]const u8) GenerateError!Uuid {
+    if (std.mem.eql(u8, version_str, "v1")) return try Uuid.v1(io, null);
     if (std.mem.eql(u8, version_str, "v3")) {
         const ns = namespace orelse return error.MissingNamespace;
         const n = name orelse return error.MissingName;
         return Uuid.v3(ns, n);
     }
-    if (std.mem.eql(u8, version_str, "v4")) return Uuid.v4();
+    if (std.mem.eql(u8, version_str, "v4")) return Uuid.v4(io);
     if (std.mem.eql(u8, version_str, "v5")) {
         const ns = namespace orelse return error.MissingNamespace;
         const n = name orelse return error.MissingName;
         return Uuid.v5(ns, n);
     }
-    if (std.mem.eql(u8, version_str, "v6")) return try Uuid.v6(null);
-    if (std.mem.eql(u8, version_str, "v7")) return try Uuid.v7();
+    if (std.mem.eql(u8, version_str, "v6")) return try Uuid.v6(io, null);
+    if (std.mem.eql(u8, version_str, "v7")) return try Uuid.v7(io);
     if (std.mem.eql(u8, version_str, "v8")) return Uuid.v8(0, 0, 0);
     return error.UnknownVersion;
 }
@@ -132,7 +134,7 @@ fn resolveNamespace(ns_str: []const u8) ?Uuid {
     return Uuid.parse(ns_str) catch null;
 }
 
-fn cmdParse(args: *std.process.ArgIterator, w: *std.Io.Writer) !void {
+fn cmdParse(args: *std.process.Args.Iterator, w: *Io.Writer) !void {
     const uuid_str = args.next() orelse {
         try w.writeAll("Error: missing UUID argument\n");
         return;
@@ -191,39 +193,42 @@ const testing = std.testing;
 
 test "generateUuid: all valid versions produce correct version" {
     const cases = [_]struct { ver: []const u8, expected: Uuid.Version }{
+        .{ .ver = "v1", .expected = .time_based },
         .{ .ver = "v4", .expected = .random },
+        .{ .ver = "v6", .expected = .time_based_reordered },
+        .{ .ver = "v7", .expected = .time_based_unix },
         .{ .ver = "v8", .expected = .custom },
     };
     for (cases) |c| {
-        const uuid = try generateUuid(c.ver, null, null);
+        const uuid = try generateUuid(testing.io, c.ver, null, null);
         try testing.expectEqual(c.expected, uuid.getVersion().?);
     }
 }
 
 test "generateUuid: v3 requires namespace and name" {
-    try testing.expectError(error.MissingNamespace, generateUuid("v3", null, "foo"));
-    try testing.expectError(error.MissingName, generateUuid("v3", Uuid.namespace_dns, null));
+    try testing.expectError(error.MissingNamespace, generateUuid(testing.io, "v3", null, "foo"));
+    try testing.expectError(error.MissingName, generateUuid(testing.io, "v3", Uuid.namespace_dns, null));
 }
 
 test "generateUuid: v5 requires namespace and name" {
-    try testing.expectError(error.MissingNamespace, generateUuid("v5", null, "foo"));
-    try testing.expectError(error.MissingName, generateUuid("v5", Uuid.namespace_dns, null));
+    try testing.expectError(error.MissingNamespace, generateUuid(testing.io, "v5", null, "foo"));
+    try testing.expectError(error.MissingName, generateUuid(testing.io, "v5", Uuid.namespace_dns, null));
 }
 
 test "generateUuid: v3 with namespace and name succeeds" {
-    const uuid = try generateUuid("v3", Uuid.namespace_dns, "example.com");
+    const uuid = try generateUuid(testing.io, "v3", Uuid.namespace_dns, "example.com");
     try testing.expectEqual(Uuid.Version.name_based_md5, uuid.getVersion().?);
 }
 
 test "generateUuid: v5 with namespace and name succeeds" {
-    const uuid = try generateUuid("v5", Uuid.namespace_dns, "example.com");
+    const uuid = try generateUuid(testing.io, "v5", Uuid.namespace_dns, "example.com");
     try testing.expectEqual(Uuid.Version.name_based_sha1, uuid.getVersion().?);
 }
 
 test "generateUuid: unknown version returns error" {
-    try testing.expectError(error.UnknownVersion, generateUuid("v9", null, null));
-    try testing.expectError(error.UnknownVersion, generateUuid("", null, null));
-    try testing.expectError(error.UnknownVersion, generateUuid("v2", null, null));
+    try testing.expectError(error.UnknownVersion, generateUuid(testing.io, "v9", null, null));
+    try testing.expectError(error.UnknownVersion, generateUuid(testing.io, "", null, null));
+    try testing.expectError(error.UnknownVersion, generateUuid(testing.io, "v2", null, null));
 }
 
 test "resolveNamespace: named namespaces" {

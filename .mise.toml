@@ -1,6 +1,6 @@
 [tools]
 goreleaser = "latest"
-zig = "0.15.2"
+zig = "0.16.0"
 
 [tasks.build]
 description = "Build the library and CLI"
