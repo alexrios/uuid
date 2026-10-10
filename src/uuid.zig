@@ -26,14 +26,14 @@ pub fn UuidImpl(
         if (@typeInfo(@TypeOf(nanoTimestampFn)) != .@"fn")
             @compileError("nanoTimestampFn must be a function, got " ++ @typeName(@TypeOf(nanoTimestampFn)));
         const nano_info = @typeInfo(@TypeOf(nanoTimestampFn)).@"fn";
-        if (nano_info.params.len != 1) @compileError("nanoTimestampFn must take one parameter (Io)");
-        if (nano_info.params[0].type.? != Io) @compileError("nanoTimestampFn parameter must be Io");
+        if (nano_info.param_types.len != 1) @compileError("nanoTimestampFn must take one parameter (Io)");
+        if (nano_info.param_types[0].? != Io) @compileError("nanoTimestampFn parameter must be Io");
         if (nano_info.return_type.? != i96) @compileError("nanoTimestampFn must return i96");
         if (@typeInfo(@TypeOf(milliTimestampFn)) != .@"fn")
             @compileError("milliTimestampFn must be a function, got " ++ @typeName(@TypeOf(milliTimestampFn)));
         const milli_info = @typeInfo(@TypeOf(milliTimestampFn)).@"fn";
-        if (milli_info.params.len != 1) @compileError("milliTimestampFn must take one parameter (Io)");
-        if (milli_info.params[0].type.? != Io) @compileError("milliTimestampFn parameter must be Io");
+        if (milli_info.param_types.len != 1) @compileError("milliTimestampFn must take one parameter (Io)");
+        if (milli_info.param_types[0].? != Io) @compileError("milliTimestampFn parameter must be Io");
         if (milli_info.return_type.? != i64) @compileError("milliTimestampFn must return i64");
     }
     return struct {
@@ -43,9 +43,9 @@ pub fn UuidImpl(
 
         // -- Constants --
         /// The nil UUID (all zeros). Represents absence of a UUID value.
-        pub const nil: Self = .{ .bytes = .{0} ** 16 };
+        pub const nil: Self = .{ .bytes = @splat(0) };
         /// The max UUID (all ones). Upper bound sentinel.
-        pub const max: Self = .{ .bytes = .{0xff} ** 16 };
+        pub const max: Self = .{ .bytes = @splat(0xff) };
 
         // -- Predefined namespace UUIDs (RFC 9562 Section 6.6) --
         pub const namespace_dns: Self = parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") catch unreachable;
@@ -257,7 +257,7 @@ pub fn UuidImpl(
         pub fn v4(io: Io) Self {
             var uuid: Self = undefined;
             io.random(&uuid.bytes);
-            setVersion(&uuid.bytes, @intFromEnum(Version.random));
+            setVersion(&uuid.bytes, @backingInt(Version.random));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .random);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -268,7 +268,7 @@ pub fn UuidImpl(
         pub fn v4WithSource(random: std.Random) Self {
             var uuid: Self = undefined;
             random.bytes(&uuid.bytes);
-            setVersion(&uuid.bytes, @intFromEnum(Version.random));
+            setVersion(&uuid.bytes, @backingInt(Version.random));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .random);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -286,7 +286,7 @@ pub fn UuidImpl(
             hasher.final(&digest);
 
             var uuid: Self = .{ .bytes = digest };
-            setVersion(&uuid.bytes, @intFromEnum(Version.name_based_md5));
+            setVersion(&uuid.bytes, @backingInt(Version.name_based_md5));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .name_based_md5);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -305,7 +305,7 @@ pub fn UuidImpl(
 
             // Take first 16 bytes of the 20-byte SHA-1 digest
             var uuid: Self = .{ .bytes = digest[0..16].* };
-            setVersion(&uuid.bytes, @intFromEnum(Version.name_based_sha1));
+            setVersion(&uuid.bytes, @backingInt(Version.name_based_sha1));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .name_based_sha1);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -328,7 +328,7 @@ pub fn UuidImpl(
             // custom_c: 62 bits → lower 62 bits of bytes[8..16] (upper 2 will be variant)
             std.mem.writeInt(u64, uuid.bytes[8..16], @as(u64, custom_c), .big);
 
-            setVersion(&uuid.bytes, @intFromEnum(Version.custom));
+            setVersion(&uuid.bytes, @backingInt(Version.custom));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .custom);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -342,7 +342,7 @@ pub fn UuidImpl(
         const GregorianState = struct {
             last_timestamp: u60 = 0,
             clock_seq: u14 = 0,
-            node: [6]u8 = .{0} ** 6,
+            node: [6]u8 = @splat(0),
             initialized: bool = false,
         };
 
@@ -453,7 +453,7 @@ pub fn UuidImpl(
             // node → bytes[10..16]
             uuid.bytes[10..16].* = node;
 
-            setVersion(&uuid.bytes, @intFromEnum(Version.time_based));
+            setVersion(&uuid.bytes, @backingInt(Version.time_based));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .time_based);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -504,7 +504,7 @@ pub fn UuidImpl(
             // node → bytes[10..16]
             uuid.bytes[10..16].* = node;
 
-            setVersion(&uuid.bytes, @intFromEnum(Version.time_based_reordered));
+            setVersion(&uuid.bytes, @backingInt(Version.time_based_reordered));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .time_based_reordered);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -591,7 +591,7 @@ pub fn UuidImpl(
             // rand_b → bytes[8..16]
             @memcpy(uuid.bytes[8..16], &rand_b);
 
-            setVersion(&uuid.bytes, @intFromEnum(Version.time_based_unix));
+            setVersion(&uuid.bytes, @backingInt(Version.time_based_unix));
             setVariant(&uuid.bytes);
             std.debug.assert(uuid.getVersion() == .time_based_unix);
             std.debug.assert(uuid.getVariant() == .rfc9562);
@@ -1260,7 +1260,7 @@ test "v7 deterministic: known fields produce exact bytes" {
 // -- v7 deterministic: counter=0, counter=max --
 test "v7 deterministic: counter boundaries" {
     const ts: u48 = 1000;
-    const rand_b = [_]u8{0} ** 8;
+    const rand_b: [8]u8 = @splat(0);
 
     // counter = 0
     const uuid_min = Uuid.v7FromFields(ts, 0, rand_b);
@@ -1292,7 +1292,7 @@ test "v7 deterministic: sequential counters are monotonic" {
 
 // -- v7 deterministic: different timestamps sort correctly --
 test "v7 deterministic: timestamp ordering" {
-    const rand_b = [_]u8{0} ** 8;
+    const rand_b: [8]u8 = @splat(0);
 
     const uuid_early = Uuid.v7FromFields(1000, 0, rand_b);
     const uuid_late = Uuid.v7FromFields(2000, 0, rand_b);
