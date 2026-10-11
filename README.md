@@ -78,7 +78,7 @@ uuid parse "2ed6657d-e927-568b-95e1-2665a8aea6a2"
 Requires [mise](https://mise.jdx.dev/).
 
 ```sh
-mise install        # zig 0.16.0 + goreleaser
+mise install        # zig 0.17.0 + goreleaser
 mise run test       # run tests
 mise run build      # build
 mise run fmt        # format
